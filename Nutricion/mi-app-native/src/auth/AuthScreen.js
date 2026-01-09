@@ -10,9 +10,7 @@ export default function AuthScreen() {
     return (
       <RegisterScreen
         emailPrefill={emailPrefill}
-        onGoLogin={() => {
-          setMode("login");
-        }}
+        onGoLogin={() => setMode("login")}
       />
     );
   }

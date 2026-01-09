@@ -1,6 +1,19 @@
 import React, { useMemo, useState } from "react";
-import { View, Image, KeyboardAvoidingView, Platform, Pressable } from "react-native";
-import { Button, Card, Text, TextInput, Divider, HelperText } from "react-native-paper";
+import {
+  View,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+} from "react-native";
+import {
+  Button,
+  Card,
+  Text,
+  TextInput,
+  Divider,
+  HelperText,
+} from "react-native-paper";
 import { createUserWithEmailAndPassword } from "firebase/auth";
 import { ref, set } from "firebase/database";
 import { router } from "expo-router";
@@ -13,9 +26,11 @@ function isValidEmail(v: string) {
 
 function niceError(e: any) {
   const code = String(e?.code || "").toLowerCase();
-  if (code.includes("auth/email-already-in-use")) return "Ese email ya está registrado. Probá iniciar sesión.";
+  if (code.includes("auth/email-already-in-use"))
+    return "Ese email ya está registrado. Probá iniciar sesión.";
   if (code.includes("auth/invalid-email")) return "El email no es válido.";
-  if (code.includes("auth/weak-password")) return "Contraseña muy débil (mínimo 6 caracteres).";
+  if (code.includes("auth/weak-password"))
+    return "Contraseña débil (mínimo 6 caracteres).";
   return "No se pudo crear la cuenta. Intentá nuevamente.";
 }
 
@@ -33,13 +48,19 @@ export default function RegisterScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const emailOk = useMemo(() => (email.length === 0 ? true : isValidEmail(email)), [email]);
-  const passOk = useMemo(() => (password.length === 0 ? true : password.length >= 6), [password]);
+  const emailOk = useMemo(
+    () => (email.length === 0 ? true : isValidEmail(email)),
+    [email]
+  );
+  const passOk = useMemo(
+    () => (password.length === 0 ? true : password.length >= 6),
+    [password]
+  );
 
   async function onRegister() {
     setError("");
-    const cleanEmail = email.trim();
 
+    const cleanEmail = email.trim();
     if (!name.trim()) {
       setError("Ingresá tu nombre.");
       return;
@@ -57,7 +78,7 @@ export default function RegisterScreen({
     try {
       const cred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
 
-      // ✅ Guardamos en RTDB como PACIENTE por defecto
+      // ✅ default PACIENTE
       await set(ref(rtdb, `users/${cred.user.uid}`), {
         uid: cred.user.uid,
         email: cleanEmail,
@@ -66,7 +87,7 @@ export default function RegisterScreen({
         createdAt: new Date().toISOString(),
       });
 
-      // ya queda logueado automáticamente por Firebase
+      // Firebase deja sesión iniciada automáticamente
     } catch (e: any) {
       setError(niceError(e));
     } finally {
@@ -79,18 +100,40 @@ export default function RegisterScreen({
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       style={{ flex: 1, backgroundColor: "#F6F7FB" }}
     >
-      <View style={{ flex: 1, justifyContent: "center", padding: 18, maxWidth: 520, width: "100%", alignSelf: "center" }}>
-        <Pressable onPress={() => router.replace("/(public)")} style={{ alignItems: "center", marginBottom: 18 }}>
-          <Image source={require("../../assets/images/icon.png")} style={{ width: 64, height: 64, borderRadius: 18 }} />
-          <Text variant="headlineMedium" style={{ marginTop: 10 }}>Crear cuenta</Text>
+      <View
+        style={{
+          flex: 1,
+          justifyContent: "center",
+          padding: 18,
+          maxWidth: 520,
+          width: "100%",
+          alignSelf: "center",
+        }}
+      >
+        <Pressable
+          onPress={() => router.replace("/(public)")}
+          style={{ alignItems: "center", marginBottom: 18 }}
+        >
+          <Image
+            source={require("../../assets/images/icon.png")}
+            style={{ width: 64, height: 64, borderRadius: 18 }}
+          />
+          <Text variant="headlineMedium" style={{ marginTop: 10 }}>
+            Crear cuenta
+          </Text>
           <Text style={{ opacity: 0.7, marginTop: 4, textAlign: "center" }}>
-            Si te registrás por mail, tu rol queda como Paciente.
+            Registro por mail (rol Paciente por defecto).
           </Text>
         </Pressable>
 
         <Card style={{ borderRadius: 22 }}>
           <Card.Content>
-            <TextInput label="Nombre" value={name} onChangeText={setName} style={{ marginBottom: 10 }} />
+            <TextInput
+              label="Nombre"
+              value={name}
+              onChangeText={setName}
+              style={{ marginBottom: 10 }}
+            />
 
             <TextInput
               label="Email"
@@ -113,7 +156,9 @@ export default function RegisterScreen({
             />
             {!passOk && <HelperText type="error">Mínimo 6 caracteres</HelperText>}
 
-            {!!error && <Text style={{ color: "#B91C1C", marginTop: 6 }}>{error}</Text>}
+            {!!error && (
+              <Text style={{ color: "#B91C1C", marginTop: 6 }}>{error}</Text>
+            )}
 
             <Button
               mode="contained"
