@@ -1,40 +1,34 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { View, Image, KeyboardAvoidingView, Platform, Pressable } from "react-native";
+import { Button, Card, Text, TextInput, Divider, HelperText } from "react-native-paper";
 import {
-  Button,
-  Card,
-  Text,
-  TextInput,
-  Divider,
-  HelperText,
-  ActivityIndicator,
-} from "react-native-paper";
-import { signInWithEmailAndPassword } from "firebase/auth";
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+} from "firebase/auth";
+import { router } from "expo-router";
+
 import { auth } from "../shared/services/firebase";
 import { useGoogleSignIn } from "../shared/services/googleAuth";
-import { router } from "expo-router";
 
 function isValidEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 }
 
-function friendlyAuthError(message: string) {
-  const msg = (message || "").toLowerCase();
+function friendlyAuthError(codeOrMessage: string) {
+  const msg = (codeOrMessage || "").toLowerCase();
 
-  if (msg.includes("invalid-credential") || msg.includes("wrong-password"))
-    return "Email o contraseña incorrectos.";
-  if (msg.includes("user-not-found")) return "No existe una cuenta con ese email.";
-  if (msg.includes("too-many-requests"))
-    return "Demasiados intentos. Probá de nuevo en unos minutos.";
+  if (msg.includes("email-already-in-use")) return "Ese email ya está en uso. Probá iniciar sesión.";
+  if (msg.includes("invalid-email")) return "El email no es válido.";
+  if (msg.includes("weak-password")) return "La contraseña es muy débil (mínimo 6 caracteres).";
+
+  if (msg.includes("invalid-credential") || msg.includes("wrong-password")) {
+    return "Contraseña incorrecta.";
+  }
+
+  if (msg.includes("too-many-requests")) return "Demasiados intentos. Probá de nuevo en unos minutos.";
   if (msg.includes("network")) return "Problema de conexión. Revisá internet e intentá nuevamente.";
 
-  // Google / AuthSession
-  if (msg.includes("redirect_uri_mismatch"))
-    return "Error de configuración de Google (redirect_uri_mismatch). Revisá los Redirect URIs autorizados.";
-  if (msg.includes("cancel") || msg.includes("dismiss"))
-    return "Cancelaste el inicio de sesión. Podés intentarlo de nuevo.";
-
-  return "No se pudo iniciar sesión. Intentá nuevamente.";
+  return "No se pudo continuar. Intentá nuevamente.";
 }
 
 export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void }) {
@@ -52,35 +46,33 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
   const { promptAsync, signInFromResponse, response, redirectUri, isConfigured } = useGoogleSignIn();
 
-  // ✅ Debug útil (sin romper mobile)
+  // Debug útil solo en web
   useEffect(() => {
-    console.log("REDIRECT URI =>", redirectUri);
     if (Platform.OS === "web") {
+      console.log("REDIRECT URI =>", redirectUri);
       // @ts-ignore
-      console.log("ORIGIN =>", window?.location?.origin);
+      console.log("ORIGIN =>", typeof window !== "undefined" ? window.location.origin : "");
     }
   }, [redirectUri]);
 
-  // ✅ Cuando vuelve Google, terminamos el login en Firebase
   useEffect(() => {
     (async () => {
       try {
         const cred = await signInFromResponse();
         if (cred) {
-          // sesión activa en Firebase ✅
+          // sesión Firebase activa
         }
       } catch (e: any) {
-        setError(friendlyAuthError(e?.message || ""));
+        setError(friendlyAuthError(e?.code || e?.message || ""));
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [response]);
 
-  async function onLoginEmail() {
+  async function onLoginEmailSmart() {
     setError("");
 
     const cleanEmail = email.trim();
-
     if (!isValidEmail(cleanEmail)) {
       setError("Ingresá un email válido.");
       return;
@@ -92,9 +84,25 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
     setBusy(true);
     try {
+      // 1) intento login normal
       await signInWithEmailAndPassword(auth, cleanEmail, password);
     } catch (e: any) {
-      setError(friendlyAuthError(e?.message || ""));
+      const code = String(e?.code || "").toLowerCase();
+
+      // 2) si no existe => lo registramos automáticamente
+      if (code.includes("user-not-found")) {
+        try {
+          await createUserWithEmailAndPassword(auth, cleanEmail, password);
+          // listo: quedó logueado automáticamente
+          return;
+        } catch (e2: any) {
+          setError(friendlyAuthError(e2?.code || e2?.message || ""));
+          return;
+        }
+      }
+
+      // otros errores (wrong-password, invalid-credential, etc.)
+      setError(friendlyAuthError(e?.code || e?.message || ""));
     } finally {
       setBusy(false);
     }
@@ -102,7 +110,6 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
   async function onLoginGoogle() {
     setError("");
-
     if (!isConfigured) {
       setError("Falta configurar EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env (reiniciá con -c).");
       return;
@@ -110,15 +117,13 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
     setBusyGoogle(true);
     try {
-      await promptAsync();
+      await promptAsync(); // sin useProxy (ya no existe en SDK actual)
     } catch (e: any) {
-      setError(friendlyAuthError(e?.message || ""));
+      setError(friendlyAuthError(e?.code || e?.message || ""));
     } finally {
       setBusyGoogle(false);
     }
   }
-
-  const disabledAll = busy || busyGoogle;
 
   return (
     <KeyboardAvoidingView
@@ -127,45 +132,39 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
     >
       <View style={{ flex: 1, justifyContent: "center", padding: 18, maxWidth: 520, width: "100%", alignSelf: "center" }}>
         {/* HEADER / BRAND */}
-        <View style={{ alignItems: "center", marginBottom: 18 }}>
-          <Pressable
-            onPress={() => router.replace("/(public)")}
-            style={{ alignItems: "center" }}
-            accessibilityRole="button"
-          >
-            <Image
-              source={require("../../assets/images/icon.png")}
-              style={{ width: 62, height: 62, borderRadius: 18 }}
-            />
-            <Text variant="headlineMedium" style={{ marginTop: 10, fontWeight: "800" }}>
-              NutriCare
-            </Text>
-            <Text style={{ opacity: 0.7, marginTop: 4, textAlign: "center", lineHeight: 20 }}>
-              Iniciá sesión para ver tu progreso, comidas y turnos.
-            </Text>
-            <Text style={{ opacity: 0.55, marginTop: 6, fontSize: 12 }}>
-              (Tocá el logo para volver al Home)
-            </Text>
-          </Pressable>
-        </View>
+        <Pressable
+          onPress={() => router.replace("/(public)")}
+          style={{ alignItems: "center", marginBottom: 18 }}
+        >
+          <Image
+            source={require("../../assets/images/icon.png")}
+            style={{ width: 64, height: 64, borderRadius: 18 }}
+          />
+          <Text variant="headlineMedium" style={{ marginTop: 10 }}>
+            NutriCare
+          </Text>
+          <Text style={{ opacity: 0.7, marginTop: 4, textAlign: "center" }}>
+            Accedé para ver tu progreso, comidas y turnos.
+          </Text>
+          <Text style={{ opacity: 0.55, marginTop: 6, fontSize: 12, textAlign: "center" }}>
+            Tocá el logo para volver al Home.
+          </Text>
+        </Pressable>
 
-        <Card style={{ borderRadius: 22, overflow: "hidden" }}>
+        <Card style={{ borderRadius: 22 }}>
           <Card.Content>
-            {/* Google */}
             <Button
               mode="contained"
               onPress={onLoginGoogle}
               loading={busyGoogle}
-              disabled={disabledAll}
+              disabled={busyGoogle || busy}
               style={{ borderRadius: 14, paddingVertical: 6 }}
-              contentStyle={{ paddingVertical: 6 }}
             >
-              Continuar con Google
+              Entrar con Google
             </Button>
 
             <Divider style={{ marginVertical: 14 }} />
 
-            {/* Email */}
             <TextInput
               label="Email"
               value={email}
@@ -173,74 +172,50 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
               autoCapitalize="none"
               keyboardType="email-address"
               error={!emailOk}
-              style={{ marginBottom: 6 }}
-              left={<TextInput.Icon icon="email-outline" />}
+              style={{ marginBottom: 8 }}
             />
             {!emailOk && <HelperText type="error">Email inválido</HelperText>}
 
-            {/* Password */}
             <TextInput
               label="Contraseña"
               value={password}
               onChangeText={setPassword}
               secureTextEntry={!showPassword}
               error={!passOk}
-              style={{ marginBottom: 6 }}
-              left={<TextInput.Icon icon="lock-outline" />}
               right={
                 <TextInput.Icon
                   icon={showPassword ? "eye-off" : "eye"}
                   onPress={() => setShowPassword((s) => !s)}
                 />
               }
+              style={{ marginBottom: 6 }}
             />
             {!passOk && <HelperText type="error">Mínimo 6 caracteres</HelperText>}
 
             {!!error && (
-              <View
-                style={{
-                  marginTop: 10,
-                  padding: 12,
-                  borderRadius: 14,
-                  backgroundColor: "#FEF2F2",
-                  borderWidth: 1,
-                  borderColor: "#FECACA",
-                }}
-              >
-                <Text style={{ color: "#991B1B", lineHeight: 20 }}>{error}</Text>
-              </View>
+              <Text style={{ color: "#B91C1C", marginTop: 6, lineHeight: 20 }}>
+                {error}
+              </Text>
             )}
 
             <Button
               mode="contained"
-              onPress={onLoginEmail}
+              onPress={onLoginEmailSmart}
               loading={busy}
-              disabled={disabledAll}
+              disabled={busy || busyGoogle}
               style={{ borderRadius: 14, marginTop: 12, paddingVertical: 6 }}
-              contentStyle={{ paddingVertical: 6 }}
             >
-              Iniciar sesión
+              Iniciar sesión (o crear cuenta)
             </Button>
 
-            <Button
-              onPress={onGoRegister}
-              disabled={disabledAll}
-              style={{ marginTop: 6 }}
-            >
-              Crear cuenta
+            {/* Si igual querés mantener registro manual */}
+            <Button onPress={onGoRegister} style={{ marginTop: 6 }}>
+              Crear cuenta manualmente
             </Button>
-
-            {/* Mini status */}
-            {(busy || busyGoogle) && (
-              <View style={{ marginTop: 10, flexDirection: "row", alignItems: "center", gap: 10 }}>
-                <ActivityIndicator />
-                <Text style={{ opacity: 0.7 }}>Procesando...</Text>
-              </View>
-            )}
           </Card.Content>
         </Card>
 
-        <Text style={{ textAlign: "center", opacity: 0.55, marginTop: 14, fontSize: 12, lineHeight: 18 }}>
+        <Text style={{ textAlign: "center", opacity: 0.55, marginTop: 14, fontSize: 12 }}>
           Al continuar aceptás nuestros términos y política de privacidad.
         </Text>
       </View>
