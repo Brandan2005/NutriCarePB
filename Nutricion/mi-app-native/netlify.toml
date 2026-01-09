@@ -1,5 +1,6 @@
 [build]
-  command = "npx expo export:web"
+  base = "Nutricion/mi-app-native"
+  command = "npm ci && npx expo export --platform web"
   publish = "dist"
 
 [[redirects]]
