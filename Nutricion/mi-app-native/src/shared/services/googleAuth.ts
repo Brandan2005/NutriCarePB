@@ -1,42 +1,62 @@
 import * as WebBrowser from "expo-web-browser";
 import * as Google from "expo-auth-session/providers/google";
 import * as AuthSession from "expo-auth-session";
-import { GoogleAuthProvider, signInWithCredential, UserCredential } from "firebase/auth";
+import { Platform } from "react-native";
+
+import { GoogleAuthProvider, signInWithCredential } from "firebase/auth";
 import { auth } from "./firebase";
 
 WebBrowser.maybeCompleteAuthSession();
 
-const WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "";
+const WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
 
-export function useGoogleSignIn() {
-  // Redirect URI real (en web es lo que se debe autorizar en Google Cloud)
-  const redirectUri = AuthSession.makeRedirectUri();
+if (!WEB_CLIENT_ID) {
+  console.warn(
+    "Falta EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID. Ponelo en .env y reiniciá con: npx expo start -c"
+  );
+}
+
+// Expo Router usa /oauthredirect (lo tenés en tus rutas exportadas)
+export function getRedirectUri() {
+  return AuthSession.makeRedirectUri({
+    path: "oauthredirect",
+  });
+}
+
+export function useGoogleLogin() {
+  const redirectUri = getRedirectUri();
 
   const [request, response, promptAsync] = Google.useAuthRequest({
-    clientId: WEB_CLIENT_ID,
+    clientId: WEB_CLIENT_ID!, // web
     redirectUri,
-    responseType: "id_token",
     scopes: ["profile", "email"],
+    responseType: "id_token",
   });
 
-  async function signInFromResponse(): Promise<UserCredential | null> {
-    if (!response) return null;
-    if (response.type !== "success") return null;
+  // Para depurar
+  // console.log("REDIRECT URI =>", redirectUri);
 
-    const idToken = (response.params as any)?.id_token as string | undefined;
-    if (!idToken) return null;
+  async function handleResponse() {
+    if (response?.type !== "success") return false;
+
+    const idToken = response.params?.id_token;
+    if (!idToken) {
+      console.log("No llegó id_token:", response);
+      return false;
+    }
 
     const credential = GoogleAuthProvider.credential(idToken);
-    return await signInWithCredential(auth, credential);
+    await signInWithCredential(auth, credential);
+    return true;
   }
 
   return {
     request,
     response,
-    promptAsync,
-    signInFromResponse,
+    promptAsync: () => promptAsync({ useProxy: false }),
+    handleResponse,
     redirectUri,
-    isConfigured: !!WEB_CLIENT_ID,
+    isReady: !!request,
+    platform: Platform.OS,
   };
 }
-
