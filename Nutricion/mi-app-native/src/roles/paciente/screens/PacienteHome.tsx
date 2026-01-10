@@ -15,23 +15,39 @@ import {
   Snackbar,
 } from "react-native-paper";
 import { signOut } from "firebase/auth";
-import { onValue, ref, push, set, update, remove } from "firebase/database";
+import {
+  onValue,
+  ref,
+  push,
+  set,
+  update,
+  remove,
+  get,
+  query,
+  orderByChild,
+  equalTo,
+  runTransaction,
+} from "firebase/database";
 import { Calendar } from "react-native-calendars";
-import { LineChart } from "react-native-gifted-charts";
 
 import { auth, rtdb } from "../../../shared/services/firebase";
 
 type WeightItem = { id: string; value: number; date: string };
 type MealItem = { id: string; date: string; mealType: string; text: string; rating: number };
 
+type NutriItem = { uid: string; name: string; email?: string; photoURL?: string };
+
+type AppointmentPatientItem = {
+  id: string;
+  nutriUid: string;
+  nutriName: string;
+  date: string;
+  time: string;
+  status: "pendiente" | "asistio" | "no_asistio" | "cancelado";
+};
+
 const { width } = Dimensions.get("window");
 const isWide = width >= 900;
-
-function formatDateLabel(iso: string) {
-  if (!iso || !iso.includes("-")) return iso;
-  const [, m, d] = iso.split("-");
-  return `${d}/${m}`;
-}
 
 function todayISO() {
   const d = new Date();
@@ -41,29 +57,17 @@ function todayISO() {
   return `${y}-${m}-${day}`;
 }
 
-function StarRating({
-  value,
-  onChange,
-  size = 22,
-}: {
-  value: number;
-  onChange?: (v: number) => void;
-  size?: number;
-}) {
-  return (
-    <View style={{ flexDirection: "row", gap: 2, alignItems: "center" }}>
-      {[1, 2, 3, 4, 5].map((n) => (
-        <IconButton
-          key={n}
-          icon={n <= value ? "star" : "star-outline"}
-          iconColor={n <= value ? "#F59E0B" : "#D1D5DB"}
-          size={size}
-          onPress={onChange ? () => onChange(n) : undefined}
-          style={{ margin: 0 }}
-        />
-      ))}
-    </View>
-  );
+function formatDateLabel(iso: string) {
+  if (!iso || !iso.includes("-")) return iso;
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+function isValidTimeHHmm(v: string) {
+  // "09:30"
+  if (!/^\d{2}:\d{2}$/.test(v)) return false;
+  const [hh, mm] = v.split(":").map(Number);
+  return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
 }
 
 export default function PacienteHome({ email }: { email: string }) {
@@ -71,30 +75,29 @@ export default function PacienteHome({ email }: { email: string }) {
 
   const [snack, setSnack] = useState<{ open: boolean; msg: string }>({ open: false, msg: "" });
   const toast = (msg: string) => setSnack({ open: true, msg });
+  const closeToast = () => setSnack({ open: false, msg: "" });
 
-  const [name, setName] = useState<string>("");
-  const [phone, setPhone] = useState<string>("");
-  const [obraSocial, setObraSocial] = useState<string>("");
-  const [photoURL, setPhotoURL] = useState<string>("");
+  // perfil
+  const [name, setName] = useState("");
+  const [photoURL, setPhotoURL] = useState("");
 
+  // datos existentes (si querés mantener)
   const [weights, setWeights] = useState<WeightItem[]>([]);
-  const [openWeightModal, setOpenWeightModal] = useState(false);
-  const [newWeight, setNewWeight] = useState("");
-  const [newWeightDate, setNewWeightDate] = useState(todayISO());
-
   const [meals, setMeals] = useState<MealItem[]>([]);
-  const [openMealModal, setOpenMealModal] = useState(false);
-  const [mealDate, setMealDate] = useState(todayISO());
-  const [mealType, setMealType] = useState("Desayuno");
-  const [mealText, setMealText] = useState("");
-  const [mealRating, setMealRating] = useState(4);
 
-  const [editingMeal, setEditingMeal] = useState<MealItem | null>(null);
+  // turnos
+  const [nutris, setNutris] = useState<NutriItem[]>([]);
+  const [selectedNutri, setSelectedNutri] = useState<NutriItem | null>(null);
 
   const [selectedDay, setSelectedDay] = useState(todayISO());
-  const [turnosCount, setTurnosCount] = useState(0);
+  const [time, setTime] = useState("15:00");
 
-  // ====== THEME (PRO white + violet, header black) ======
+  const [openCreateAppt, setOpenCreateAppt] = useState(false);
+  const [busyCreate, setBusyCreate] = useState(false);
+
+  const [myAppointments, setMyAppointments] = useState<AppointmentPatientItem[]>([]);
+
+  // ====== THEME (pro white + violet, header black) ======
   const theme = useMemo(
     () => ({
       violet: "#6D28D9",
@@ -116,6 +119,8 @@ export default function PacienteHome({ email }: { email: string }) {
       headerMuted: "#CBD5E1",
 
       danger: "#EF4444",
+      ok: "#16A34A",
+      warn: "#F59E0B",
 
       shadow: {
         shadowColor: "#000",
@@ -128,25 +133,59 @@ export default function PacienteHome({ email }: { email: string }) {
     []
   );
 
+  const styles = useMemo(
+    () => ({
+      sectionCard: {
+        borderRadius: 24,
+        backgroundColor: theme.surface,
+        borderWidth: 1,
+        borderColor: theme.border2,
+        ...theme.shadow,
+      } as any,
+      innerCard: {
+        borderRadius: 18,
+        backgroundColor: theme.surface,
+        borderWidth: 1,
+        borderColor: theme.border,
+      } as any,
+      primaryBtn: { borderRadius: 14, backgroundColor: theme.violet } as any,
+      secondaryBtn: { borderRadius: 14, borderColor: theme.violet } as any,
+      subtleDivider: { backgroundColor: theme.border2 } as any,
+      pill: {
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: theme.violetRing,
+        backgroundColor: theme.violetSoft,
+      } as any,
+      hero: {
+        borderRadius: 22,
+        padding: 16,
+        borderWidth: 1,
+        borderColor: theme.violetRing,
+        backgroundColor: theme.violetSoft,
+      } as any,
+    }),
+    [theme]
+  );
+
+  // marked dates (solo selección)
   const markedDates = useMemo(() => {
-    const marks: any = {};
-    marks[selectedDay] = { selected: true, selectedColor: theme.violet };
-    return marks;
+    return {
+      [selectedDay]: { selected: true, selectedColor: theme.violet },
+    } as any;
   }, [selectedDay, theme.violet]);
 
+  // ====== Cargar perfil + datos (lo tuyo) ======
   useEffect(() => {
     if (!user) return;
 
     const userRef = ref(rtdb, `users/${user.uid}`);
     const weightsRef = ref(rtdb, `weights/${user.uid}`);
     const mealsRef = ref(rtdb, `meals/${user.uid}`);
-    const turnosRef = ref(rtdb, `turnos/byPaciente/${user.uid}`);
 
     const unsubUser = onValue(userRef, (snap) => {
-      const data = snap.val();
+      const data = snap.val() || {};
       setName(data?.name || data?.email?.split("@")?.[0] || "Paciente");
-      setPhone(data?.phone || "");
-      setObraSocial(data?.obraSocial || "");
       setPhotoURL(data?.photoURL || "");
     });
 
@@ -174,143 +213,200 @@ export default function PacienteHome({ email }: { email: string }) {
       setMeals(list);
     });
 
-    const unsubTurnos = onValue(turnosRef, (snap) => {
-      const val = snap.val() || {};
-      setTurnosCount(Object.keys(val).length);
-    });
-
     return () => {
       unsubUser();
       unsubWeights();
       unsubMeals();
-      unsubTurnos();
     };
   }, [user]);
 
-  const chartData = useMemo(() => {
-    return weights
-      .filter((w) => w.date && !Number.isNaN(w.value) && w.value > 0)
-      .map((w) => ({ value: w.value, label: formatDateLabel(w.date) }));
-  }, [weights]);
+  // ====== Listar nutricionistas (role == Nutricionista) ======
+  useEffect(() => {
+    const q = query(ref(rtdb, "users"), orderByChild("role"), equalTo("Nutricionista"));
+    const unsub = onValue(q, (snap) => {
+      const val = snap.val() || {};
+      const list: NutriItem[] = Object.keys(val).map((uid) => ({
+        uid,
+        name: val[uid]?.name || val[uid]?.email?.split("@")?.[0] || "Nutricionista",
+        email: val[uid]?.email || "",
+        photoURL: val[uid]?.photoURL || "",
+      }));
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      setNutris(list);
 
-  const chartMax = useMemo(() => {
-    if (chartData.length === 0) return 0;
-    const max = Math.max(...chartData.map((d) => d.value));
-    return max + 2;
-  }, [chartData]);
-
-  async function saveProfile() {
-    if (!user) return;
-    await update(ref(rtdb, `users/${user.uid}`), {
-      name: name.trim(),
-      phone: phone.trim(),
-      obraSocial: obraSocial.trim(),
+      // si no hay seleccionado, elegí el primero
+      setSelectedNutri((prev) => {
+        if (prev) return prev;
+        return list[0] || null;
+      });
     });
-    toast("Datos guardados ✅");
+
+    return () => unsub();
+  }, []);
+
+  // ====== Mis turnos (index por paciente) ======
+  useEffect(() => {
+    if (!user) return;
+
+    const idxRef = ref(rtdb, `appointmentsByPatient/${user.uid}`);
+    const unsub = onValue(idxRef, (snap) => {
+      const val = snap.val() || {};
+      const list: AppointmentPatientItem[] = Object.keys(val).map((id) => ({
+        id,
+        nutriUid: String(val[id]?.nutriUid || ""),
+        nutriName: String(val[id]?.nutriName || "Nutricionista"),
+        date: String(val[id]?.date || ""),
+        time: String(val[id]?.time || ""),
+        status: (val[id]?.status || "pendiente") as any,
+      }));
+
+      // ordenar por fecha+hora
+      list.sort((a, b) => {
+        const ka = `${a.date} ${a.time}`;
+        const kb = `${b.date} ${b.time}`;
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      });
+
+      setMyAppointments(list);
+    });
+
+    return () => unsub();
+  }, [user]);
+
+  function statusChip(status: AppointmentPatientItem["status"]) {
+    const map = {
+      pendiente: { label: "Pendiente", bg: theme.violetSoft, fg: "#4C1D95", bd: theme.violetRing },
+      asistio: { label: "Asistió", bg: "#DCFCE7", fg: "#166534", bd: "#BBF7D0" },
+      no_asistio: { label: "No asistió", bg: "#FEF3C7", fg: "#92400E", bd: "#FDE68A" },
+      cancelado: { label: "Cancelado", bg: "#FEE2E2", fg: "#991B1B", bd: "#FECACA" },
+    }[status];
+
+    return (
+      <View
+        style={{
+          paddingHorizontal: 10,
+          paddingVertical: 4,
+          borderRadius: 999,
+          backgroundColor: map.bg,
+          borderWidth: 1,
+          borderColor: map.bd,
+        }}
+      >
+        <Text style={{ color: map.fg, fontSize: 12, fontWeight: "800" }}>{map.label}</Text>
+      </View>
+    );
   }
 
-  async function addWeight() {
+  // ====== Crear turno con bloqueo anti-choque ======
+  async function createAppointment() {
     if (!user) return;
-    const value = Number(String(newWeight).replace(",", "."));
-    if (!value || value <= 0) {
-      toast("Ingresá un peso válido.");
+    if (!selectedNutri) {
+      toast("Elegí un nutricionista.");
+      return;
+    }
+    if (!isValidTimeHHmm(time)) {
+      toast("Hora inválida. Usá formato HH:MM (ej 15:30).");
       return;
     }
 
-    const listRef = ref(rtdb, `weights/${user.uid}`);
-    const newRef = push(listRef);
-    await set(newRef, { value, date: newWeightDate });
+    setBusyCreate(true);
+    try {
+      const nutriUid = selectedNutri.uid;
+      const date = selectedDay;
+      const hhmm = time;
 
-    setOpenWeightModal(false);
-    setNewWeight("");
-    setNewWeightDate(todayISO());
-    toast("Peso registrado ✅");
-  }
+      // Generamos id desde appointments (push)
+      const apptRef = push(ref(rtdb, "appointments"));
+      const apptId = apptRef.key!;
+      const slotRef = ref(rtdb, `slots/${nutriUid}/${date}/${hhmm}`);
 
-  async function addMeal() {
-    if (!user) return;
-    if (!mealText.trim()) {
-      toast("Escribí qué comiste.");
-      return;
+      // 1) Transaction: si slot vacío => guardo apptId, si ya existe => rechazo
+      const tx = await runTransaction(slotRef, (current) => {
+        if (current === null) return apptId;
+        return; // aborta
+      });
+
+      if (!tx.committed) {
+        toast("Ese horario ya está ocupado. Elegí otra hora.");
+        return;
+      }
+
+      const patientName = name || email?.split("@")?.[0] || "Paciente";
+      const nutriName = selectedNutri.name || "Nutricionista";
+      const createdAt = Date.now();
+
+      // 2) Multi-update: appointments + índices
+      const updates: any = {};
+      updates[`appointments/${apptId}`] = {
+        patientUid: user.uid,
+        patientName,
+        nutriUid,
+        nutriName,
+        date,
+        time: hhmm,
+        status: "pendiente",
+        createdAt,
+      };
+      updates[`appointmentsByPatient/${user.uid}/${apptId}`] = {
+        nutriUid,
+        nutriName,
+        date,
+        time: hhmm,
+        status: "pendiente",
+      };
+      updates[`appointmentsByNutri/${nutriUid}/${apptId}`] = {
+        patientUid: user.uid,
+        patientName,
+        date,
+        time: hhmm,
+        status: "pendiente",
+      };
+
+      await update(ref(rtdb), updates);
+
+      setOpenCreateAppt(false);
+      toast("Turno solicitado ✅");
+    } catch (e: any) {
+      console.log(e);
+      toast("No se pudo crear el turno. Probá de nuevo.");
+    } finally {
+      setBusyCreate(false);
     }
-
-    const listRef = ref(rtdb, `meals/${user.uid}`);
-    const newRef = push(listRef);
-    await set(newRef, {
-      date: mealDate,
-      mealType,
-      text: mealText.trim(),
-      rating: mealRating,
-    });
-
-    setOpenMealModal(false);
-    setMealText("");
-    setMealRating(4);
-    setMealType("Desayuno");
-    setMealDate(todayISO());
-    toast("Comida guardada ✅");
   }
 
-  async function saveMealEdit() {
-    if (!user || !editingMeal) return;
-    await update(ref(rtdb, `meals/${user.uid}/${editingMeal.id}`), {
-      date: editingMeal.date,
-      mealType: editingMeal.mealType,
-      text: editingMeal.text,
-      rating: editingMeal.rating,
-    });
-    setEditingMeal(null);
-    toast("Comida actualizada ✅");
-  }
-
-  async function deleteMeal(id: string) {
+  async function cancelMyAppointment(item: AppointmentPatientItem) {
     if (!user) return;
-    await remove(ref(rtdb, `meals/${user.uid}/${id}`));
-    toast("Comida eliminada 🗑️");
-  }
 
-  const styles = useMemo(
-    () => ({
-      sectionCard: {
-        borderRadius: 24,
-        backgroundColor: theme.surface,
-        borderWidth: 1,
-        borderColor: theme.border2,
-        ...theme.shadow,
-      } as any,
-      innerCard: {
-        borderRadius: 18,
-        backgroundColor: theme.surface,
-        borderWidth: 1,
-        borderColor: theme.border,
-      } as any,
-      pill: {
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: theme.violetRing,
-        backgroundColor: theme.violetSoft,
-      } as any,
-      primaryBtn: {
-        borderRadius: 14,
-        backgroundColor: theme.violet,
-      } as any,
-      secondaryBtn: {
-        borderRadius: 14,
-        borderColor: theme.violet,
-      } as any,
-      subtleDivider: {
-        backgroundColor: theme.border2,
-      } as any,
-      hero: {
-        borderRadius: 22,
-        padding: 16,
-        borderWidth: 1,
-        borderColor: theme.violetRing,
-        backgroundColor: theme.violetSoft,
-      } as any,
-    }),
-    [theme]
-  );
+    try {
+      const apptId = item.id;
+
+      // leo el turno principal para saber nutriUid/date/time (por si el index quedó mal)
+      const snap = await get(ref(rtdb, `appointments/${apptId}`));
+      const appt = snap.val();
+
+      if (!appt) {
+        toast("No se encontró el turno.");
+        return;
+      }
+
+      const nutriUid = appt.nutriUid;
+      const date = appt.date;
+      const hhmm = appt.time;
+
+      const updates: any = {};
+      updates[`appointments/${apptId}/status`] = "cancelado";
+      updates[`appointmentsByPatient/${user.uid}/${apptId}/status`] = "cancelado";
+      updates[`appointmentsByNutri/${nutriUid}/${apptId}/status`] = "cancelado";
+      // libero slot
+      updates[`slots/${nutriUid}/${date}/${hhmm}`] = null;
+
+      await update(ref(rtdb), updates);
+      toast("Turno cancelado 🗑️");
+    } catch (e) {
+      console.log(e);
+      toast("No se pudo cancelar.");
+    }
+  }
 
   return (
     <PaperProvider>
@@ -329,34 +425,21 @@ export default function PacienteHome({ email }: { email: string }) {
           }}
         >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            <Image
-              source={require("../../../../assets/images/icon.png")}
-              style={{ width: 34, height: 34, borderRadius: 12 }}
-            />
+            <Image source={require("../../../../assets/images/icon.png")} style={{ width: 34, height: 34, borderRadius: 12 }} />
             <View>
               <Text variant="titleMedium" style={{ color: theme.headerText, fontWeight: "800" }}>
                 NutriCare
               </Text>
-              <Text style={{ color: theme.headerMuted, marginTop: -2, fontSize: 12 }}>
-                Panel Paciente
-              </Text>
+              <Text style={{ color: theme.headerMuted, marginTop: -2, fontSize: 12 }}>Panel Paciente</Text>
             </View>
           </View>
 
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            {photoURL ? (
-              <Avatar.Image size={36} source={{ uri: photoURL }} />
-            ) : (
-              <Avatar.Text size={36} label={(name || "P")[0]?.toUpperCase()} />
-            )}
-
+            {photoURL ? <Avatar.Image size={36} source={{ uri: photoURL }} /> : <Avatar.Text size={36} label={(name || "P")[0]?.toUpperCase()} />}
             <View style={{ alignItems: "flex-end" }}>
-              <Text style={{ fontWeight: "800", color: theme.headerText, lineHeight: 18 }}>
-                {name || "Paciente"}
-              </Text>
+              <Text style={{ fontWeight: "800", color: theme.headerText, lineHeight: 18 }}>{name || "Paciente"}</Text>
               <Text style={{ color: theme.headerMuted, fontSize: 11 }}>{email}</Text>
             </View>
-
             <Button mode="text" textColor="#FCA5A5" onPress={() => signOut(auth)}>
               Cerrar sesión
             </Button>
@@ -366,16 +449,14 @@ export default function PacienteHome({ email }: { email: string }) {
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 40 }}>
           {/* HERO */}
           <View style={styles.hero}>
-            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
-              Hola, {name || "Paciente"} 👋
-            </Text>
+            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>Hola, {name || "Paciente"} 👋</Text>
             <Text style={{ color: "#5B21B6", marginTop: 6, lineHeight: 20 }}>
-              Tu panel personal para registrar comidas, progreso y turnos.
+              Pedí turnos, registrá tus comidas y mirá tu progreso.
             </Text>
 
             <View style={{ marginTop: 12, flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
               <Chip style={styles.pill} textStyle={{ color: "#4C1D95", fontWeight: "700" }}>
-                Peso: {weights.length ? `${weights[weights.length - 1].value} kg` : "—"}
+                Turnos: {myAppointments.length}
               </Chip>
               <Chip
                 style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
@@ -387,138 +468,132 @@ export default function PacienteHome({ email }: { email: string }) {
                 style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
                 textStyle={{ color: theme.text, fontWeight: "700" }}
               >
-                Turnos: {turnosCount}
+                Pesos: {weights.length}
               </Chip>
             </View>
           </View>
 
+          {/* GRID */}
           <View style={{ marginTop: 12, flexDirection: isWide ? "row" : "column", gap: 12 }}>
-            {/* PERFIL */}
+            {/* PEDIR TURNO */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Datos del perfil</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>Mantené tus datos actualizados.</Text>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Pedir turno</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>
+                  Elegí nutricionista, fecha y hora. Si el nutri ya está ocupado, te avisa.
+                </Text>
 
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
-                <TextInput label="Nombre" value={name} onChangeText={setName} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
-                <TextInput label="Teléfono" value={phone} onChangeText={setPhone} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
-                <TextInput label="Obra social" value={obraSocial} onChangeText={setObraSocial} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
+                {/* Selector nutricionistas */}
+                {nutris.length === 0 ? (
+                  <Text style={{ color: theme.muted }}>No hay nutricionistas cargados (role="Nutricionista").</Text>
+                ) : (
+                  <View style={{ gap: 8 }}>
+                    <Text style={{ fontWeight: "900", color: theme.text }}>Nutricionista</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                      {nutris.map((n) => {
+                        const active = selectedNutri?.uid === n.uid;
+                        return (
+                          <Button
+                            key={n.uid}
+                            mode={active ? "contained" : "outlined"}
+                            onPress={() => setSelectedNutri(n)}
+                            style={{ borderRadius: 999, backgroundColor: active ? theme.violet : undefined, borderColor: theme.violet }}
+                            textColor={active ? "#FFF" : theme.violet}
+                          >
+                            {n.name}
+                          </Button>
+                        );
+                      })}
+                    </ScrollView>
+                  </View>
+                )}
 
-                <Button mode="contained" style={styles.primaryBtn} onPress={saveProfile}>
-                  Guardar datos
+                <View style={{ marginTop: 12 }}>
+                  <Text style={{ fontWeight: "900", color: theme.text }}>Fecha</Text>
+                  <View style={{ marginTop: 8 }}>
+                    <Calendar
+                      onDayPress={(day) => setSelectedDay(day.dateString)}
+                      markedDates={markedDates}
+                      theme={{
+                        todayTextColor: theme.violet,
+                        arrowColor: theme.violet,
+                        selectedDayBackgroundColor: theme.violet,
+                        selectedDayTextColor: "#FFFFFF",
+                        monthTextColor: theme.text,
+                        dayTextColor: theme.text,
+                        textDisabledColor: "#9CA3AF",
+                      }}
+                      style={{
+                        borderRadius: 18,
+                        overflow: "hidden",
+                        borderWidth: 1,
+                        borderColor: theme.border2,
+                        backgroundColor: "#FFFFFF",
+                      }}
+                    />
+                  </View>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={{ fontWeight: "900", color: theme.text }}>Hora (HH:MM)</Text>
+                  <TextInput
+                    value={time}
+                    onChangeText={setTime}
+                    mode="outlined"
+                    outlineColor={theme.border}
+                    activeOutlineColor={theme.violet}
+                    textColor={theme.text}
+                    style={{ marginTop: 8, backgroundColor: "#FFF" }}
+                    placeholder="15:30"
+                  />
+                  <Text style={{ color: theme.muted, marginTop: 6, fontSize: 12 }}>
+                    Seleccionado: {formatDateLabel(selectedDay)} a las {time}
+                  </Text>
+                </View>
+
+                <Button
+                  mode="contained"
+                  style={[styles.primaryBtn, { marginTop: 12 }]}
+                  onPress={() => setOpenCreateAppt(true)}
+                  disabled={!selectedNutri}
+                >
+                  Solicitar turno
                 </Button>
               </Card.Content>
             </Card>
 
-            {/* ACCIONES */}
+            {/* MIS TURNOS */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Acciones rápidas</Text>
-                <Text style={{ color: theme.muted, marginTop: 6, lineHeight: 22 }}>
-                  Registrá tu progreso y mantené consistencia.
-                </Text>
-
-                <View style={{ flexDirection: "row", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-                  <Button mode="contained" style={styles.primaryBtn} onPress={() => setOpenWeightModal(true)}>
-                    Medir peso
-                  </Button>
-
-                  <Button mode="outlined" style={styles.secondaryBtn} onPress={() => setOpenMealModal(true)} textColor={theme.violet}>
-                    Agregar comida
-                  </Button>
-                </View>
-
-                <View
-                  style={{
-                    marginTop: 14,
-                    padding: 12,
-                    borderRadius: 16,
-                    borderWidth: 1,
-                    borderColor: theme.border2,
-                    backgroundColor: "#FFFFFF",
-                  }}
-                >
-                  <Text style={{ color: theme.muted, lineHeight: 20 }}>
-                    Tip: cargá comidas y peso seguido para ver tu progreso más claro 📈
-                  </Text>
-                </View>
-              </Card.Content>
-            </Card>
-          </View>
-
-          {/* GRÁFICO */}
-          <View style={{ marginTop: 12 }}>
-            <Card style={styles.sectionCard}>
-              <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Progreso de peso</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>Visualizá tu evolución por fecha.</Text>
-
-                <View style={{ marginTop: 12 }}>
-                  {chartData.length >= 2 ? (
-                    <View style={{ backgroundColor: "#fff", borderRadius: 18, paddingVertical: 10, paddingHorizontal: 8, borderWidth: 1, borderColor: theme.border2 }}>
-                      <LineChart
-                        data={chartData}
-                        spacing={44}
-                        initialSpacing={10}
-                        thickness={3}
-                        curved
-                        yAxisLabelSuffix="kg"
-                        noOfSections={4}
-                        maxValue={chartMax}
-                        height={220}
-                        rulesType="solid"
-                      />
-                    </View>
-                  ) : (
-                    <View style={{ padding: 16, backgroundColor: "#fff", borderRadius: 18, borderWidth: 1, borderColor: theme.border2 }}>
-                      <Text style={{ color: theme.muted }}>Cargá al menos 2 registros de peso para ver el gráfico.</Text>
-                    </View>
-                  )}
-                </View>
-              </Card.Content>
-            </Card>
-          </View>
-
-          {/* COMIDAS */}
-          <View style={{ marginTop: 12 }}>
-            <Card style={styles.sectionCard}>
-              <Card.Content>
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                  <View>
-                    <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas</Text>
-                    <Text style={{ color: theme.muted, marginTop: 4 }}>Historial por fecha ⭐</Text>
-                  </View>
-
-                  <Button mode="contained" style={styles.primaryBtn} onPress={() => setOpenMealModal(true)}>
-                    Agregar
-                  </Button>
-                </View>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Mis turnos</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>Acá ves tus solicitudes y estado.</Text>
 
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
-                {meals.length === 0 ? (
-                  <Text style={{ color: theme.muted }}>Todavía no cargaste comidas. Tocá “Agregar”.</Text>
+                {myAppointments.length === 0 ? (
+                  <Text style={{ color: theme.muted }}>Todavía no pediste turnos.</Text>
                 ) : (
                   <View style={{ gap: 10 }}>
-                    {meals.map((m) => (
-                      <Card key={m.id} style={styles.innerCard}>
+                    {myAppointments.map((a) => (
+                      <Card key={a.id} style={styles.innerCard}>
                         <Card.Content>
                           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                             <View style={{ flex: 1, paddingRight: 8 }}>
                               <Text style={{ fontWeight: "900", color: theme.text }}>
-                                {formatDateLabel(m.date)} · {m.mealType}
+                                {a.nutriName} · {formatDateLabel(a.date)} {a.time}
                               </Text>
-                              <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
-
-                              <View style={{ marginTop: 8 }}>
-                                <StarRating value={m.rating} />
-                              </View>
+                              <View style={{ marginTop: 8, alignSelf: "flex-start" }}>{statusChip(a.status)}</View>
                             </View>
 
                             <View style={{ flexDirection: "row" }}>
-                              <IconButton icon="pencil" iconColor={theme.violet} onPress={() => setEditingMeal({ ...m })} />
-                              <IconButton icon="trash-can-outline" iconColor={theme.danger} onPress={() => deleteMeal(m.id)} />
+                              <IconButton
+                                icon="close-circle-outline"
+                                iconColor={theme.danger}
+                                onPress={() => cancelMyAppointment(a)}
+                                disabled={a.status === "cancelado" || a.status === "asistio" || a.status === "no_asistio"}
+                              />
                             </View>
                           </View>
                         </Card.Content>
@@ -529,57 +604,13 @@ export default function PacienteHome({ email }: { email: string }) {
               </Card.Content>
             </Card>
           </View>
-
-          {/* CALENDARIO (solo visual) */}
-          <View style={{ marginTop: 12 }}>
-            <Card style={styles.sectionCard}>
-              <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Turnos</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Seleccioná una fecha. En el siguiente paso vamos a crear/mostrar turnos reales desde Firebase.
-                </Text>
-
-                <View style={{ marginTop: 12 }}>
-                  <Calendar
-                    onDayPress={(day) => setSelectedDay(day.dateString)}
-                    markedDates={markedDates}
-                    theme={{
-                      todayTextColor: theme.violet,
-                      arrowColor: theme.violet,
-                      selectedDayBackgroundColor: theme.violet,
-                      selectedDayTextColor: "#FFFFFF",
-                      monthTextColor: theme.text,
-                      dayTextColor: theme.text,
-                      textDisabledColor: "#9CA3AF",
-                    }}
-                    style={{
-                      borderRadius: 18,
-                      overflow: "hidden",
-                      borderWidth: 1,
-                      borderColor: theme.border2,
-                      backgroundColor: "#FFFFFF",
-                    }}
-                  />
-                </View>
-
-                <View style={{ marginTop: 12, padding: 14, backgroundColor: theme.violetSoft, borderRadius: 18, borderWidth: 1, borderColor: theme.violetRing }}>
-                  <Text style={{ fontWeight: "900", color: "#4C1D95" }}>
-                    Seleccionado: {selectedDay}
-                  </Text>
-                  <Text style={{ color: "#5B21B6", marginTop: 6 }}>
-                    (Próximo) Acá vamos a listar turnos reales para este día.
-                  </Text>
-                </View>
-              </Card.Content>
-            </Card>
-          </View>
         </ScrollView>
 
-        {/* MODAL PESO */}
+        {/* MODAL CONFIRMAR TURNO */}
         <Portal>
           <Modal
-            visible={openWeightModal}
-            onDismiss={() => setOpenWeightModal(false)}
+            visible={openCreateAppt}
+            onDismiss={() => setOpenCreateAppt(false)}
             contentContainerStyle={{
               backgroundColor: "#FFFFFF",
               margin: 18,
@@ -590,110 +621,27 @@ export default function PacienteHome({ email }: { email: string }) {
               ...theme.shadow,
             }}
           >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Registrar peso</Text>
+            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Confirmar turno</Text>
+            <Text style={{ color: theme.muted, marginTop: 8, lineHeight: 20 }}>
+              Nutricionista: <Text style={{ fontWeight: "900" }}>{selectedNutri?.name || "-"}</Text>
+              {"\n"}Fecha: <Text style={{ fontWeight: "900" }}>{formatDateLabel(selectedDay)}</Text>
+              {"\n"}Hora: <Text style={{ fontWeight: "900" }}>{time}</Text>
+            </Text>
 
-            <TextInput label="Peso (kg)" value={newWeight} onChangeText={setNewWeight} keyboardType="numeric" mode="outlined" style={{ marginTop: 12, backgroundColor: "#fff" }} />
-            <TextInput label="Fecha (YYYY-MM-DD)" value={newWeightDate} onChangeText={setNewWeightDate} mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
+            <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenWeightModal(false)}>Cancelar</Button>
-              <Button mode="contained" onPress={addWeight} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
-                Guardar
+            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end" }}>
+              <Button onPress={() => setOpenCreateAppt(false)} textColor={theme.text}>
+                Volver
+              </Button>
+              <Button mode="contained" onPress={createAppointment} loading={busyCreate} style={styles.primaryBtn}>
+                Confirmar
               </Button>
             </View>
           </Modal>
         </Portal>
 
-        {/* MODAL COMIDA */}
-        <Portal>
-          <Modal
-            visible={openMealModal}
-            onDismiss={() => setOpenMealModal(false)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 18,
-              padding: 18,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-            }}
-          >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
-
-            <TextInput label="Fecha (YYYY-MM-DD)" value={mealDate} onChangeText={setMealDate} mode="outlined" style={{ marginTop: 12, backgroundColor: "#fff" }} />
-            <TextInput label="Tipo (Desayuno/Almuerzo/Merienda/Cena)" value={mealType} onChangeText={setMealType} mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
-            <TextInput label="¿Qué comiste?" value={mealText} onChangeText={setMealText} multiline mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
-
-            <View style={{ marginTop: 10 }}>
-              <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
-              <StarRating value={mealRating} onChange={setMealRating} />
-            </View>
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenMealModal(false)}>Cancelar</Button>
-              <Button mode="contained" onPress={addMeal} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
-                Guardar
-              </Button>
-            </View>
-          </Modal>
-        </Portal>
-
-        {/* MODAL EDITAR */}
-        <Portal>
-          <Modal
-            visible={!!editingMeal}
-            onDismiss={() => setEditingMeal(null)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 18,
-              padding: 18,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-            }}
-          >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Editar comida</Text>
-
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={editingMeal?.date || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, date: t } : p))}
-              mode="outlined"
-              style={{ marginTop: 12, backgroundColor: "#fff" }}
-            />
-            <TextInput
-              label="Tipo"
-              value={editingMeal?.mealType || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, mealType: t } : p))}
-              mode="outlined"
-              style={{ marginTop: 10, backgroundColor: "#fff" }}
-            />
-            <TextInput
-              label="Texto"
-              value={editingMeal?.text || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, text: t } : p))}
-              multiline
-              mode="outlined"
-              style={{ marginTop: 10, backgroundColor: "#fff" }}
-            />
-
-            <View style={{ marginTop: 10 }}>
-              <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
-              <StarRating value={editingMeal?.rating || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, rating: v } : p))} />
-            </View>
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setEditingMeal(null)}>Cancelar</Button>
-              <Button mode="contained" onPress={saveMealEdit} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
-                Guardar cambios
-              </Button>
-            </View>
-          </Modal>
-        </Portal>
-
-        <Snackbar visible={snack.open} onDismiss={() => setSnack({ open: false, msg: "" })} duration={2500}>
+        <Snackbar visible={snack.open} onDismiss={closeToast} duration={2500}>
           {snack.msg}
         </Snackbar>
       </View>
