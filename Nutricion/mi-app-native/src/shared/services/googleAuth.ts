@@ -1,52 +1,55 @@
-// src/shared/services/googleAuth.ts
 import * as WebBrowser from "expo-web-browser";
 import * as Google from "expo-auth-session/providers/google";
-import * as AuthSession from "expo-auth-session";
-import { Platform } from "react-native";
-
-import { GoogleAuthProvider, signInWithCredential } from "firebase/auth";
+import { makeRedirectUri } from "expo-auth-session";
+import { GoogleAuthProvider, signInWithCredential, getAdditionalUserInfo } from "firebase/auth";
 import { auth } from "./firebase";
 
 WebBrowser.maybeCompleteAuthSession();
 
-const WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
-
-function getRedirectUri() {
-  return AuthSession.makeRedirectUri({
-    path: "oauthredirect",
-  });
-}
+type GoogleSignInResult = {
+  isNewUser: boolean;
+};
 
 export function useGoogleSignIn() {
-  const redirectUri = getRedirectUri();
-  const isConfigured = !!WEB_CLIENT_ID;
+  const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? "";
 
+  // IMPORTANTÍSIMO:
+  // En Netlify, vos autorizaste: https://<tu-dominio>/oauthredirect
+  // Expo usa este path por defecto. Lo dejamos explícito para que coincida.
+  const redirectUri = makeRedirectUri({ path: "oauthredirect" });
+
+  // ✅ ESTE HOOK DEVUELVE UN ARRAY (request, response, promptAsync)
   const [request, response, promptAsync] = Google.useAuthRequest({
-    clientId: WEB_CLIENT_ID || "MISSING",
+    webClientId,
     redirectUri,
     scopes: ["profile", "email"],
-    responseType: "id_token",
   });
 
-  async function signInFromResponse() {
+  async function signInFromResponse(): Promise<GoogleSignInResult | null> {
     if (response?.type !== "success") return null;
 
-    const idToken = (response.params as any)?.id_token;
-    if (!idToken) return null;
+    // En expo-auth-session el token suele venir en response.params
+    const params = (response as any)?.params ?? {};
+    const idToken: string | undefined = params.id_token;
+    const accessToken: string | undefined = params.access_token;
 
-    const credential = GoogleAuthProvider.credential(idToken);
-    return await signInWithCredential(auth, credential);
+    if (!idToken) throw new Error("Google Sign-In: missing id_token");
+
+    const credential = GoogleAuthProvider.credential(idToken, accessToken);
+    const userCred = await signInWithCredential(auth, credential);
+
+    const info = getAdditionalUserInfo(userCred);
+    return { isNewUser: !!info?.isNewUser };
   }
 
   return {
     request,
     response,
     redirectUri,
-    isConfigured,
-    // ✅ en SDK 54 / expo-auth-session 7 NO existe useProxy
+    isConfigured: !!webClientId,
+    // ✅ sin useProxy (en SDK 54 ya no va)
     promptAsync: () => promptAsync(),
     signInFromResponse,
-    platform: Platform.OS,
   };
 }
 

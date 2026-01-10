@@ -20,7 +20,6 @@ import { Calendar } from "react-native-calendars";
 import { LineChart } from "react-native-gifted-charts";
 
 import { auth, rtdb } from "../../../shared/services/firebase";
-import { useGoogleCalendarAuth, googleCreateEvent } from "../../../shared/services/googleCalendar";
 
 type WeightItem = { id: string; value: number; date: string };
 type MealItem = { id: string; date: string; mealType: string; text: string; rating: number };
@@ -70,9 +69,6 @@ function StarRating({
 export default function PacienteHome({ email }: { email: string }) {
   const user = auth.currentUser;
 
-  const { accessToken, promptAsync } = useGoogleCalendarAuth();
-  const [calendarLinked, setCalendarLinked] = useState(false);
-
   const [snack, setSnack] = useState<{ open: boolean; msg: string }>({ open: false, msg: "" });
   const toast = (msg: string) => setSnack({ open: true, msg });
 
@@ -96,18 +92,17 @@ export default function PacienteHome({ email }: { email: string }) {
   const [editingMeal, setEditingMeal] = useState<MealItem | null>(null);
 
   const [selectedDay, setSelectedDay] = useState(todayISO());
+  const [turnosCount, setTurnosCount] = useState(0);
 
   // ====== THEME (PRO white + violet, header black) ======
   const theme = useMemo(
     () => ({
-      // brand
-      violet: "#6D28D9", // deep violet
-      violet2: "#8B5CF6", // accent
-      violetSoft: "#F3E8FF", // surface tint
+      violet: "#6D28D9",
+      violet2: "#8B5CF6",
+      violetSoft: "#F3E8FF",
       violetRing: "#DDD6FE",
 
-      // neutrals
-      pageBg: "#F8FAFC", // subtle off-white
+      pageBg: "#F8FAFC",
       surface: "#FFFFFF",
       border: "#E5E7EB",
       border2: "#EEF2F7",
@@ -115,7 +110,6 @@ export default function PacienteHome({ email }: { email: string }) {
       text: "#0F172A",
       muted: "#64748B",
 
-      // header
       headerBg: "#000000",
       headerBorder: "#111827",
       headerText: "#F9FAFB",
@@ -123,7 +117,6 @@ export default function PacienteHome({ email }: { email: string }) {
 
       danger: "#EF4444",
 
-      // elevation
       shadow: {
         shadowColor: "#000",
         shadowOpacity: 0.08,
@@ -138,12 +131,8 @@ export default function PacienteHome({ email }: { email: string }) {
   const markedDates = useMemo(() => {
     const marks: any = {};
     marks[selectedDay] = { selected: true, selectedColor: theme.violet };
-
-    marks["2025-04-21"] = { marked: true, dotColor: theme.violet2 };
-    marks["2025-04-28"] = { marked: true, dotColor: theme.violet2 };
-
     return marks;
-  }, [selectedDay, theme.violet, theme.violet2]);
+  }, [selectedDay, theme.violet]);
 
   useEffect(() => {
     if (!user) return;
@@ -151,6 +140,7 @@ export default function PacienteHome({ email }: { email: string }) {
     const userRef = ref(rtdb, `users/${user.uid}`);
     const weightsRef = ref(rtdb, `weights/${user.uid}`);
     const mealsRef = ref(rtdb, `meals/${user.uid}`);
+    const turnosRef = ref(rtdb, `turnos/byPaciente/${user.uid}`);
 
     const unsubUser = onValue(userRef, (snap) => {
       const data = snap.val();
@@ -184,24 +174,23 @@ export default function PacienteHome({ email }: { email: string }) {
       setMeals(list);
     });
 
+    const unsubTurnos = onValue(turnosRef, (snap) => {
+      const val = snap.val() || {};
+      setTurnosCount(Object.keys(val).length);
+    });
+
     return () => {
       unsubUser();
       unsubWeights();
       unsubMeals();
+      unsubTurnos();
     };
   }, [user]);
-
-  useEffect(() => {
-    if (accessToken) setCalendarLinked(true);
-  }, [accessToken]);
 
   const chartData = useMemo(() => {
     return weights
       .filter((w) => w.date && !Number.isNaN(w.value) && w.value > 0)
-      .map((w) => ({
-        value: w.value,
-        label: formatDateLabel(w.date),
-      }));
+      .map((w) => ({ value: w.value, label: formatDateLabel(w.date) }));
   }, [weights]);
 
   const chartMax = useMemo(() => {
@@ -280,38 +269,6 @@ export default function PacienteHome({ email }: { email: string }) {
     toast("Comida eliminada 🗑️");
   }
 
-  async function connectGoogleCalendar() {
-    try {
-      await promptAsync();
-    } catch {
-      toast("No se pudo conectar Google Calendar.");
-    }
-  }
-
-  async function createCalendarEventDemo() {
-    try {
-      if (!accessToken) {
-        toast("Primero conectá Google Calendar.");
-        return;
-      }
-
-      const startISO = new Date().toISOString();
-      const endISO = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-
-      await googleCreateEvent(accessToken, {
-        title: "Turno NutriCare (demo)",
-        startISO,
-        endISO,
-        description: `Evento creado desde NutriCare para ${email}`,
-      });
-
-      toast("Evento creado en tu Google Calendar ✅");
-    } catch (e: any) {
-      toast(e?.message ? String(e.message).slice(0, 120) : "Error creando evento (Google Calendar).");
-    }
-  }
-
-  // Reusable styles (makes it look consistent + pro)
   const styles = useMemo(
     () => ({
       sectionCard: {
@@ -333,11 +290,6 @@ export default function PacienteHome({ email }: { email: string }) {
         borderColor: theme.violetRing,
         backgroundColor: theme.violetSoft,
       } as any,
-      input: {
-        backgroundColor: "#FFFFFF",
-      } as any,
-      inputOutline: theme.border,
-      inputActive: theme.violet,
       primaryBtn: {
         borderRadius: 14,
         backgroundColor: theme.violet,
@@ -363,7 +315,7 @@ export default function PacienteHome({ email }: { email: string }) {
   return (
     <PaperProvider>
       <View style={{ flex: 1, backgroundColor: theme.pageBg }}>
-        {/* HEADER (NEGRO PREMIUM) */}
+        {/* HEADER */}
         <View
           style={{
             height: 74,
@@ -412,7 +364,7 @@ export default function PacienteHome({ email }: { email: string }) {
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 40 }}>
-          {/* HERO / BIENVENIDA */}
+          {/* HERO */}
           <View style={styles.hero}>
             <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
               Hola, {name || "Paciente"} 👋
@@ -426,75 +378,32 @@ export default function PacienteHome({ email }: { email: string }) {
                 Peso: {weights.length ? `${weights[weights.length - 1].value} kg` : "—"}
               </Chip>
               <Chip
-                style={{
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: theme.border2,
-                  backgroundColor: "#FFFFFF",
-                }}
+                style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
                 textStyle={{ color: theme.text, fontWeight: "700" }}
               >
                 Comidas: {meals.length}
               </Chip>
               <Chip
-                style={{
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: theme.border2,
-                  backgroundColor: "#FFFFFF",
-                }}
+                style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
                 textStyle={{ color: theme.text, fontWeight: "700" }}
               >
-                Turnos:
+                Turnos: {turnosCount}
               </Chip>
             </View>
           </View>
 
-          {/* GRID */}
           <View style={{ marginTop: 12, flexDirection: isWide ? "row" : "column", gap: 12 }}>
-            {/* DATOS */}
+            {/* PERFIL */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                  Datos del perfil
-                </Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Mantené tus datos actualizados para tu seguimiento.
-                </Text>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Datos del perfil</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>Mantené tus datos actualizados.</Text>
 
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
-                <TextInput
-                  label="Nombre"
-                  value={name}
-                  onChangeText={setName}
-                  style={[{ marginBottom: 10 }, styles.input]}
-                  outlineColor={styles.inputOutline}
-                  activeOutlineColor={styles.inputActive}
-                  textColor={theme.text}
-                  mode="outlined"
-                />
-                <TextInput
-                  label="Teléfono"
-                  value={phone}
-                  onChangeText={setPhone}
-                  keyboardType="phone-pad"
-                  style={[{ marginBottom: 10 }, styles.input]}
-                  outlineColor={styles.inputOutline}
-                  activeOutlineColor={styles.inputActive}
-                  textColor={theme.text}
-                  mode="outlined"
-                />
-                <TextInput
-                  label="Obra social"
-                  value={obraSocial}
-                  onChangeText={setObraSocial}
-                  style={[{ marginBottom: 10 }, styles.input]}
-                  outlineColor={styles.inputOutline}
-                  activeOutlineColor={styles.inputActive}
-                  textColor={theme.text}
-                  mode="outlined"
-                />
+                <TextInput label="Nombre" value={name} onChangeText={setName} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
+                <TextInput label="Teléfono" value={phone} onChangeText={setPhone} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
+                <TextInput label="Obra social" value={obraSocial} onChangeText={setObraSocial} mode="outlined" style={{ marginBottom: 10, backgroundColor: "#fff" }} />
 
                 <Button mode="contained" style={styles.primaryBtn} onPress={saveProfile}>
                   Guardar datos
@@ -505,9 +414,7 @@ export default function PacienteHome({ email }: { email: string }) {
             {/* ACCIONES */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                  Acciones rápidas
-                </Text>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Acciones rápidas</Text>
                 <Text style={{ color: theme.muted, marginTop: 6, lineHeight: 22 }}>
                   Registrá tu progreso y mantené consistencia.
                 </Text>
@@ -519,28 +426,6 @@ export default function PacienteHome({ email }: { email: string }) {
 
                   <Button mode="outlined" style={styles.secondaryBtn} onPress={() => setOpenMealModal(true)} textColor={theme.violet}>
                     Agregar comida
-                  </Button>
-
-                  <Button
-                    mode={calendarLinked ? "contained" : "outlined"}
-                    style={{
-                      borderRadius: 14,
-                      backgroundColor: calendarLinked ? theme.violet : undefined,
-                      borderColor: theme.violet,
-                    }}
-                    onPress={connectGoogleCalendar}
-                    textColor={calendarLinked ? "#FFFFFF" : theme.violet}
-                  >
-                    {calendarLinked ? "Google Calendar conectado" : "Conectar Google Calendar"}
-                  </Button>
-
-                  <Button
-                    mode="contained"
-                    style={styles.primaryBtn}
-                    onPress={createCalendarEventDemo}
-                    disabled={!accessToken}
-                  >
-                    Crear turno (demo)
                   </Button>
                 </View>
 
@@ -555,7 +440,7 @@ export default function PacienteHome({ email }: { email: string }) {
                   }}
                 >
                   <Text style={{ color: theme.muted, lineHeight: 20 }}>
-                    Tip: Cargá comidas y peso seguido para ver tu progreso más claro 📈
+                    Tip: cargá comidas y peso seguido para ver tu progreso más claro 📈
                   </Text>
                 </View>
               </Card.Content>
@@ -566,57 +451,28 @@ export default function PacienteHome({ email }: { email: string }) {
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                  Progreso de peso
-                </Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Visualizá tu evolución por fecha.
-                </Text>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Progreso de peso</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>Visualizá tu evolución por fecha.</Text>
 
                 <View style={{ marginTop: 12 }}>
                   {chartData.length >= 2 ? (
-                    <View
-                      style={{
-                        backgroundColor: "#FFFFFF",
-                        borderRadius: 18,
-                        paddingVertical: 10,
-                        paddingHorizontal: 8,
-                        borderWidth: 1,
-                        borderColor: theme.border2,
-                      }}
-                    >
+                    <View style={{ backgroundColor: "#fff", borderRadius: 18, paddingVertical: 10, paddingHorizontal: 8, borderWidth: 1, borderColor: theme.border2 }}>
                       <LineChart
                         data={chartData}
                         spacing={44}
                         initialSpacing={10}
                         thickness={3}
                         curved
-                        hideDataPoints={false}
-                        dataPointsHeight={8}
-                        dataPointsWidth={8}
-                        yAxisTextStyle={{ color: theme.muted }}
-                        xAxisLabelTextStyle={{ color: theme.muted, fontSize: 12 }}
                         yAxisLabelSuffix="kg"
                         noOfSections={4}
                         maxValue={chartMax}
-                        rulesType="solid"
-                        showVerticalLines={false}
                         height={220}
+                        rulesType="solid"
                       />
                     </View>
                   ) : (
-                    <View
-                      style={{
-                        padding: 16,
-                        backgroundColor: "#FFFFFF",
-                        borderRadius: 18,
-                        borderWidth: 1,
-                        borderColor: theme.border2,
-                      }}
-                    >
-                      <Text style={{ color: theme.muted }}>
-                        Cargá al menos 2 registros de peso para ver el gráfico.
-                      </Text>
+                    <View style={{ padding: 16, backgroundColor: "#fff", borderRadius: 18, borderWidth: 1, borderColor: theme.border2 }}>
+                      <Text style={{ color: theme.muted }}>Cargá al menos 2 registros de peso para ver el gráfico.</Text>
                     </View>
                   )}
                 </View>
@@ -630,12 +486,8 @@ export default function PacienteHome({ email }: { email: string }) {
               <Card.Content>
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                   <View>
-                    <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                      Comidas
-                    </Text>
-                    <Text style={{ color: theme.muted, marginTop: 4 }}>
-                      Historial por fecha con experiencia ⭐
-                    </Text>
+                    <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas</Text>
+                    <Text style={{ color: theme.muted, marginTop: 4 }}>Historial por fecha ⭐</Text>
                   </View>
 
                   <Button mode="contained" style={styles.primaryBtn} onPress={() => setOpenMealModal(true)}>
@@ -650,33 +502,14 @@ export default function PacienteHome({ email }: { email: string }) {
                 ) : (
                   <View style={{ gap: 10 }}>
                     {meals.map((m) => (
-                      <Card key={m.id} style={{ ...styles.innerCard }}>
+                      <Card key={m.id} style={styles.innerCard}>
                         <Card.Content>
                           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                             <View style={{ flex: 1, paddingRight: 8 }}>
-                              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                <Text style={{ fontWeight: "900", color: theme.text }}>
-                                  {formatDateLabel(m.date)} · {m.mealType}
-                                </Text>
-                                <View
-                                  style={{
-                                    paddingHorizontal: 10,
-                                    paddingVertical: 4,
-                                    borderRadius: 999,
-                                    backgroundColor: theme.violetSoft,
-                                    borderWidth: 1,
-                                    borderColor: theme.violetRing,
-                                  }}
-                                >
-                                  <Text style={{ color: "#4C1D95", fontSize: 12, fontWeight: "800" }}>
-                                    ⭐ {m.rating}/5
-                                  </Text>
-                                </View>
-                              </View>
-
-                              <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>
-                                {m.text}
+                              <Text style={{ fontWeight: "900", color: theme.text }}>
+                                {formatDateLabel(m.date)} · {m.mealType}
                               </Text>
+                              <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
 
                               <View style={{ marginTop: 8 }}>
                                 <StarRating value={m.rating} />
@@ -697,15 +530,13 @@ export default function PacienteHome({ email }: { email: string }) {
             </Card>
           </View>
 
-          {/* CALENDARIO */}
+          {/* CALENDARIO (solo visual) */}
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
-                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                  Turnos
-                </Text>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Turnos</Text>
                 <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Calendario (alfa). La creación real de turnos la vamos a hacer con Google Calendar.
+                  Seleccioná una fecha. En el siguiente paso vamos a crear/mostrar turnos reales desde Firebase.
                 </Text>
 
                 <View style={{ marginTop: 12 }}>
@@ -731,21 +562,12 @@ export default function PacienteHome({ email }: { email: string }) {
                   />
                 </View>
 
-                <View
-                  style={{
-                    marginTop: 12,
-                    padding: 14,
-                    backgroundColor: theme.violetSoft,
-                    borderRadius: 18,
-                    borderWidth: 1,
-                    borderColor: theme.violetRing,
-                  }}
-                >
+                <View style={{ marginTop: 12, padding: 14, backgroundColor: theme.violetSoft, borderRadius: 18, borderWidth: 1, borderColor: theme.violetRing }}>
                   <Text style={{ fontWeight: "900", color: "#4C1D95" }}>
                     Seleccionado: {selectedDay}
                   </Text>
                   <Text style={{ color: "#5B21B6", marginTop: 6 }}>
-                    (Alfa) No hay turnos cargados para este día.
+                    (Próximo) Acá vamos a listar turnos reales para este día.
                   </Text>
                 </View>
               </Card.Content>
@@ -769,35 +591,12 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Registrar peso</Text>
-            <Text style={{ color: theme.muted, marginTop: 6 }}>Guardalo y se verá en tu gráfico.</Text>
 
-            <TextInput
-              label="Peso (kg)"
-              value={newWeight}
-              onChangeText={setNewWeight}
-              keyboardType="numeric"
-              style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
-
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={newWeightDate}
-              onChangeText={setNewWeightDate}
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+            <TextInput label="Peso (kg)" value={newWeight} onChangeText={setNewWeight} keyboardType="numeric" mode="outlined" style={{ marginTop: 12, backgroundColor: "#fff" }} />
+            <TextInput label="Fecha (YYYY-MM-DD)" value={newWeightDate} onChangeText={setNewWeightDate} mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenWeightModal(false)} textColor={theme.text}>
-                Cancelar
-              </Button>
+              <Button onPress={() => setOpenWeightModal(false)}>Cancelar</Button>
               <Button mode="contained" onPress={addWeight} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
                 Guardar
               </Button>
@@ -821,41 +620,10 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
-            <Text style={{ color: theme.muted, marginTop: 6 }}>Fecha, tipo de comida y experiencia.</Text>
 
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={mealDate}
-              onChangeText={setMealDate}
-              style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
-
-            <TextInput
-              label="Tipo (Desayuno/Almuerzo/Merienda/Cena)"
-              value={mealType}
-              onChangeText={setMealType}
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
-
-            <TextInput
-              label="¿Qué comiste?"
-              value={mealText}
-              onChangeText={setMealText}
-              multiline
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+            <TextInput label="Fecha (YYYY-MM-DD)" value={mealDate} onChangeText={setMealDate} mode="outlined" style={{ marginTop: 12, backgroundColor: "#fff" }} />
+            <TextInput label="Tipo (Desayuno/Almuerzo/Merienda/Cena)" value={mealType} onChangeText={setMealType} mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
+            <TextInput label="¿Qué comiste?" value={mealText} onChangeText={setMealText} multiline mode="outlined" style={{ marginTop: 10, backgroundColor: "#fff" }} />
 
             <View style={{ marginTop: 10 }}>
               <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
@@ -863,9 +631,7 @@ export default function PacienteHome({ email }: { email: string }) {
             </View>
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
-                Cancelar
-              </Button>
+              <Button onPress={() => setOpenMealModal(false)}>Cancelar</Button>
               <Button mode="contained" onPress={addMeal} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
                 Guardar
               </Button>
@@ -894,48 +660,32 @@ export default function PacienteHome({ email }: { email: string }) {
               label="Fecha (YYYY-MM-DD)"
               value={editingMeal?.date || ""}
               onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, date: t } : p))}
-              style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
               mode="outlined"
+              style={{ marginTop: 12, backgroundColor: "#fff" }}
             />
-
             <TextInput
               label="Tipo"
               value={editingMeal?.mealType || ""}
               onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, mealType: t } : p))}
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
               mode="outlined"
+              style={{ marginTop: 10, backgroundColor: "#fff" }}
             />
-
             <TextInput
               label="Texto"
               value={editingMeal?.text || ""}
               onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, text: t } : p))}
               multiline
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
               mode="outlined"
+              style={{ marginTop: 10, backgroundColor: "#fff" }}
             />
 
             <View style={{ marginTop: 10 }}>
               <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
-              <StarRating
-                value={editingMeal?.rating || 0}
-                onChange={(v) => setEditingMeal((p) => (p ? { ...p, rating: v } : p))}
-              />
+              <StarRating value={editingMeal?.rating || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, rating: v } : p))} />
             </View>
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
-                Cancelar
-              </Button>
+              <Button onPress={() => setEditingMeal(null)}>Cancelar</Button>
               <Button mode="contained" onPress={saveMealEdit} style={{ borderRadius: 12, backgroundColor: theme.violet }}>
                 Guardar cambios
               </Button>
@@ -950,4 +700,3 @@ export default function PacienteHome({ email }: { email: string }) {
     </PaperProvider>
   );
 }
-
