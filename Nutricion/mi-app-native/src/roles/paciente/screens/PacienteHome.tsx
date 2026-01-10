@@ -34,7 +34,21 @@ import { LineChart } from "react-native-gifted-charts";
 import { auth, rtdb } from "../../../shared/services/firebase";
 
 type WeightItem = { id: string; value: number; date: string };
-type MealItem = { id: string; date: string; mealType: string; text: string; rating: number };
+
+type MealItem = {
+  id: string;
+  date: string;
+  mealType: string;
+  text: string;
+
+  // ✅ experiencia con 6 ratings
+  ratingGeneral: number; // antes era rating
+  q1: number;
+  q2: number;
+  q3: number;
+  q4: number;
+  q5: number;
+};
 
 type NutriItem = { uid: string; name: string; email?: string; photoURL?: string };
 
@@ -62,6 +76,16 @@ function todayISO() {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+// Normaliza "9:0" -> "09:00"
+function normalizeTimeHHmm(v: string) {
+  const trimmed = (v || "").trim();
+  const parts = trimmed.split(":");
+  if (parts.length !== 2) return trimmed;
+  const hh = String(Number(parts[0])).padStart(2, "0");
+  const mm = String(Number(parts[1])).padStart(2, "0");
+  return `${hh}:${mm}`;
 }
 
 function isValidTimeHHmm(v: string) {
@@ -120,7 +144,15 @@ export default function PacienteHome({ email }: { email: string }) {
   const [mealDate, setMealDate] = useState(todayISO());
   const [mealType, setMealType] = useState("Desayuno");
   const [mealText, setMealText] = useState("");
-  const [mealRating, setMealRating] = useState(4);
+
+  // ✅ experiencia con 6 preguntas
+  const [ratingGeneral, setRatingGeneral] = useState(4);
+  const [q1, setQ1] = useState(4);
+  const [q2, setQ2] = useState(4);
+  const [q3, setQ3] = useState(4);
+  const [q4, setQ4] = useState(4);
+  const [q5, setQ5] = useState(4);
+
   const [editingMeal, setEditingMeal] = useState<MealItem | null>(null);
 
   // Turnos
@@ -157,8 +189,6 @@ export default function PacienteHome({ email }: { email: string }) {
       headerMuted: "#CBD5E1",
 
       danger: "#EF4444",
-      ok: "#16A34A",
-      warn: "#F59E0B",
 
       shadow: {
         shadowColor: "#000",
@@ -201,7 +231,6 @@ export default function PacienteHome({ email }: { email: string }) {
         backgroundColor: theme.violetSoft,
       } as any,
 
-      // BOTONES (violeta + texto blanco)
       btnPrimary: { borderRadius: 14 } as any,
       btnPrimaryColor: theme.violet,
       btnPrimaryText: "#FFFFFF",
@@ -246,15 +275,28 @@ export default function PacienteHome({ email }: { email: string }) {
       setWeights(list);
     });
 
+    // ✅ comidas: soporta el modelo viejo (rating) y el nuevo (ratingGeneral + q1..q5)
     const unsubMeals = onValue(mealsRef, (snap) => {
       const val = snap.val() || {};
-      const list: MealItem[] = Object.keys(val).map((id) => ({
-        id,
-        date: String(val[id]?.date ?? ""),
-        mealType: String(val[id]?.mealType ?? ""),
-        text: String(val[id]?.text ?? ""),
-        rating: Number(val[id]?.rating ?? 0),
-      }));
+      const list: MealItem[] = Object.keys(val).map((id) => {
+        const item = val[id] || {};
+        const oldRating = Number(item?.rating ?? 0);
+
+        return {
+          id,
+          date: String(item?.date ?? ""),
+          mealType: String(item?.mealType ?? ""),
+          text: String(item?.text ?? ""),
+
+          ratingGeneral: Number(item?.ratingGeneral ?? oldRating ?? 0),
+          q1: Number(item?.q1 ?? oldRating ?? 0),
+          q2: Number(item?.q2 ?? oldRating ?? 0),
+          q3: Number(item?.q3 ?? oldRating ?? 0),
+          q4: Number(item?.q4 ?? oldRating ?? 0),
+          q5: Number(item?.q5 ?? oldRating ?? 0),
+        };
+      });
+
       list.sort((a, b) => (a.date > b.date ? -1 : 1));
       setMeals(list);
     });
@@ -266,7 +308,7 @@ export default function PacienteHome({ email }: { email: string }) {
     };
   }, [user]);
 
-  // ===== Nutricionistas: role === "nutricionista" (minúscula) =====
+  // ===== Nutricionistas: role === "nutricionista" =====
   useEffect(() => {
     const q = query(ref(rtdb, "users"), orderByChild("role"), equalTo("nutricionista"));
     const unsub = onValue(q, (snap) => {
@@ -329,7 +371,7 @@ export default function PacienteHome({ email }: { email: string }) {
     return max + 2;
   }, [chartData]);
 
-  // ===== Acciones existentes =====
+  // ===== Acciones =====
   async function saveProfile() {
     if (!user) return;
     await update(ref(rtdb, `users/${user.uid}`), {
@@ -358,6 +400,7 @@ export default function PacienteHome({ email }: { email: string }) {
     toast("Peso registrado ✅");
   }
 
+  // ✅ Comidas con 6 ratings
   async function addMeal() {
     if (!user) return;
     if (!mealText.trim()) {
@@ -371,25 +414,47 @@ export default function PacienteHome({ email }: { email: string }) {
       date: mealDate,
       mealType,
       text: mealText.trim(),
-      rating: mealRating,
+
+      ratingGeneral,
+      q1,
+      q2,
+      q3,
+      q4,
+      q5,
     });
 
     setOpenMealModal(false);
     setMealText("");
-    setMealRating(4);
     setMealType("Desayuno");
     setMealDate(todayISO());
+
+    // resetea estrellas
+    setRatingGeneral(4);
+    setQ1(4);
+    setQ2(4);
+    setQ3(4);
+    setQ4(4);
+    setQ5(4);
+
     toast("Comida guardada ✅");
   }
 
   async function saveMealEdit() {
     if (!user || !editingMeal) return;
+
     await update(ref(rtdb, `meals/${user.uid}/${editingMeal.id}`), {
       date: editingMeal.date,
       mealType: editingMeal.mealType,
       text: editingMeal.text,
-      rating: editingMeal.rating,
+
+      ratingGeneral: editingMeal.ratingGeneral,
+      q1: editingMeal.q1,
+      q2: editingMeal.q2,
+      q3: editingMeal.q3,
+      q4: editingMeal.q4,
+      q5: editingMeal.q5,
     });
+
     setEditingMeal(null);
     toast("Comida actualizada ✅");
   }
@@ -400,14 +465,18 @@ export default function PacienteHome({ email }: { email: string }) {
     toast("Comida eliminada 🗑️");
   }
 
-  // ===== TURNOS: crear con anti-choque por slots =====
+  // ✅ TURNOS: bloqueo global por slots/{nutriUid}/{date}/{hhmm}
   async function createAppointment() {
     if (!user) return;
     if (!selectedNutri) {
       toast("Elegí un nutricionista.");
       return;
     }
-    if (!isValidTimeHHmm(time)) {
+
+    const hhmm = normalizeTimeHHmm(time);
+    setTime(hhmm);
+
+    if (!isValidTimeHHmm(hhmm)) {
       toast("Hora inválida. Usá HH:MM (ej 15:30).");
       return;
     }
@@ -416,21 +485,28 @@ export default function PacienteHome({ email }: { email: string }) {
     try {
       const nutriUid = selectedNutri.uid;
       const date = selectedDay;
-      const hhmm = time;
 
-      const apptRef = push(ref(rtdb, "appointments"));
-      const apptId = apptRef.key!;
+      // ✅ clave única global del turno
       const slotRef = ref(rtdb, `slots/${nutriUid}/${date}/${hhmm}`);
 
-      const tx = await runTransaction(slotRef, (current) => {
-        if (current === null) return apptId;
-        return; // aborta si ya hay algo
-      });
+      // Transaction: si ya existe algo, aborta.
+      const tx = await runTransaction(
+        slotRef,
+        (current) => {
+          if (current === null) return true; // reservar
+          return; // abort
+        },
+        { applyLocally: false }
+      );
 
       if (!tx.committed) {
         toast("Ese horario ya está ocupado. Elegí otra hora.");
         return;
       }
+
+      // ✅ Si reservó el slot, recién ahora creamos el turno
+      const apptRef = push(ref(rtdb, "appointments"));
+      const apptId = apptRef.key!;
 
       const patientName = name || email?.split("@")?.[0] || "Paciente";
       const nutriName = selectedNutri.name || "Nutricionista";
@@ -461,6 +537,9 @@ export default function PacienteHome({ email }: { email: string }) {
         time: hhmm,
         status: "pendiente",
       };
+
+      // guardamos el id del turno en el slot (útil para debug)
+      updates[`slots/${nutriUid}/${date}/${hhmm}`] = apptId;
 
       await update(ref(rtdb), updates);
 
@@ -581,9 +660,7 @@ export default function PacienteHome({ email }: { email: string }) {
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 40 }}>
           {/* HERO */}
           <View style={styles.hero}>
-            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
-              Hola, {name || "Paciente"} 👋
-            </Text>
+            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>Hola, {name || "Paciente"} 👋</Text>
             <Text style={{ color: "#5B21B6", marginTop: 6, lineHeight: 20 }}>
               Tu panel para registrar comidas, progreso y gestionar turnos.
             </Text>
@@ -607,9 +684,8 @@ export default function PacienteHome({ email }: { email: string }) {
             </View>
           </View>
 
-          {/* GRID 1: PERFIL + ACCIONES */}
+          {/* PERFIL + ACCIONES */}
           <View style={{ marginTop: 12, flexDirection: isWide ? "row" : "column", gap: 12 }}>
-            {/* PERFIL */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Datos del perfil</Text>
@@ -660,7 +736,6 @@ export default function PacienteHome({ email }: { email: string }) {
               </Card.Content>
             </Card>
 
-            {/* ACCIONES */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Acciones rápidas</Text>
@@ -679,12 +754,7 @@ export default function PacienteHome({ email }: { email: string }) {
                     Medir peso
                   </Button>
 
-                  <Button
-                    mode="outlined"
-                    style={styles.btnOutline}
-                    textColor={styles.btnOutlineText}
-                    onPress={() => setOpenMealModal(true)}
-                  >
+                  <Button mode="outlined" style={styles.btnOutline} textColor={styles.btnOutlineText} onPress={() => setOpenMealModal(true)}>
                     Agregar comida
                   </Button>
                 </View>
@@ -707,7 +777,7 @@ export default function PacienteHome({ email }: { email: string }) {
             </Card>
           </View>
 
-          {/* PROGRESO DE PESO (GRÁFICO) */}
+          {/* PROGRESO PESO */}
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
@@ -795,28 +865,43 @@ export default function PacienteHome({ email }: { email: string }) {
                         <Card.Content>
                           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                             <View style={{ flex: 1, paddingRight: 8 }}>
-                              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                <Text style={{ fontWeight: "900", color: theme.text }}>
-                                  {formatDateLabel(m.date)} · {m.mealType}
-                                </Text>
-                                <View
-                                  style={{
-                                    paddingHorizontal: 10,
-                                    paddingVertical: 4,
-                                    borderRadius: 999,
-                                    backgroundColor: theme.violetSoft,
-                                    borderWidth: 1,
-                                    borderColor: theme.violetRing,
-                                  }}
-                                >
-                                  <Text style={{ color: "#4C1D95", fontSize: 12, fontWeight: "800" }}>⭐ {m.rating}/5</Text>
-                                </View>
-                              </View>
+                              <Text style={{ fontWeight: "900", color: theme.text }}>
+                                {formatDateLabel(m.date)} · {m.mealType}
+                              </Text>
 
                               <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
 
-                              <View style={{ marginTop: 8 }}>
-                                <StarRating value={m.rating} />
+                              {/* ✅ Experiencia con 6 preguntas */}
+                              <View style={{ marginTop: 12 }}>
+                                <Text style={{ color: theme.text, fontWeight: "900", marginBottom: 6 }}>Experiencia</Text>
+
+                                <Text style={{ color: theme.muted }}>General</Text>
+                                <StarRating value={m.ratingGeneral} />
+
+                                <View style={{ height: 8 }} />
+
+                                <Text style={{ color: theme.muted }}>Saciada/o</Text>
+                                <StarRating value={m.q1} />
+
+                                <View style={{ height: 8 }} />
+
+                                <Text style={{ color: theme.muted }}>Energía</Text>
+                                <StarRating value={m.q2} />
+
+                                <View style={{ height: 8 }} />
+
+                                <Text style={{ color: theme.muted }}>Digestión</Text>
+                                <StarRating value={m.q3} />
+
+                                <View style={{ height: 8 }} />
+
+                                <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
+                                <StarRating value={m.q4} />
+
+                                <View style={{ height: 8 }} />
+
+                                <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
+                                <StarRating value={m.q5} />
                               </View>
                             </View>
 
@@ -834,22 +919,19 @@ export default function PacienteHome({ email }: { email: string }) {
             </Card>
           </View>
 
-          {/* TURNOS (CALENDARIO + PEDIR + LISTA) */}
+          {/* TURNOS */}
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Turnos</Text>
                 <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Elegí nutricionista + fecha + hora. Si el horario ya está ocupado, te avisa.
+                  Se bloquea por nutricionista + fecha + hora. Si alguien ya lo pidió, no te deja.
                 </Text>
 
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
-                {/* NUTRIS */}
                 {nutris.length === 0 ? (
-                  <Text style={{ color: theme.muted }}>
-                    No hay nutricionistas cargados (role="nutricionista").
-                  </Text>
+                  <Text style={{ color: theme.muted }}>No hay nutricionistas cargados (role="nutricionista").</Text>
                 ) : (
                   <View style={{ gap: 10 }}>
                     <Text style={{ fontWeight: "900", color: theme.text }}>Nutricionista</Text>
@@ -873,7 +955,6 @@ export default function PacienteHome({ email }: { email: string }) {
                   </View>
                 )}
 
-                {/* CALENDARIO */}
                 <View style={{ marginTop: 12 }}>
                   <Calendar
                     onDayPress={(day) => setSelectedDay(day.dateString)}
@@ -897,7 +978,6 @@ export default function PacienteHome({ email }: { email: string }) {
                   />
                 </View>
 
-                {/* HORA + BOTÓN */}
                 <View style={{ marginTop: 12 }}>
                   <Text style={{ fontWeight: "900", color: theme.text }}>Hora (HH:MM)</Text>
                   <TextInput
@@ -911,7 +991,7 @@ export default function PacienteHome({ email }: { email: string }) {
                     placeholder="15:30"
                   />
                   <Text style={{ color: theme.muted, marginTop: 6, fontSize: 12 }}>
-                    Seleccionado: {formatDateLabel(selectedDay)} a las {time}
+                    Seleccionado: {formatDateLabel(selectedDay)} a las {normalizeTimeHHmm(time)}
                   </Text>
                 </View>
 
@@ -926,7 +1006,6 @@ export default function PacienteHome({ email }: { email: string }) {
                   Solicitar turno
                 </Button>
 
-                {/* MIS TURNOS */}
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
                 <Text style={{ color: theme.text, fontSize: 14, fontWeight: "900" }}>Mis turnos</Text>
 
@@ -1007,13 +1086,7 @@ export default function PacienteHome({ email }: { email: string }) {
               <Button onPress={() => setOpenWeightModal(false)} textColor={theme.text}>
                 Cancelar
               </Button>
-              <Button
-                mode="contained"
-                onPress={addWeight}
-                style={{ borderRadius: 12 }}
-                buttonColor={theme.violet}
-                textColor="#FFFFFF"
-              >
+              <Button mode="contained" onPress={addWeight} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
                 Guardar
               </Button>
             </View>
@@ -1072,22 +1145,39 @@ export default function PacienteHome({ email }: { email: string }) {
               mode="outlined"
             />
 
-            <View style={{ marginTop: 10 }}>
-              <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
-              <StarRating value={mealRating} onChange={setMealRating} />
+            {/* ✅ 6 preguntas con estrellas */}
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
+
+              <Text style={{ color: theme.muted }}>General</Text>
+              <StarRating value={ratingGeneral} onChange={setRatingGeneral} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Saciada/o</Text>
+              <StarRating value={q1} onChange={setQ1} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Energía</Text>
+              <StarRating value={q2} onChange={setQ2} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Digestión</Text>
+              <StarRating value={q3} onChange={setQ3} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
+              <StarRating value={q4} onChange={setQ4} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
+              <StarRating value={q5} onChange={setQ5} />
             </View>
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
               <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
                 Cancelar
               </Button>
-              <Button
-                mode="contained"
-                onPress={addMeal}
-                style={{ borderRadius: 12 }}
-                buttonColor={theme.violet}
-                textColor="#FFFFFF"
-              >
+              <Button mode="contained" onPress={addMeal} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
                 Guardar
               </Button>
             </View>
@@ -1145,25 +1235,39 @@ export default function PacienteHome({ email }: { email: string }) {
               mode="outlined"
             />
 
-            <View style={{ marginTop: 10 }}>
-              <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia</Text>
-              <StarRating
-                value={editingMeal?.rating || 0}
-                onChange={(v) => setEditingMeal((p) => (p ? { ...p, rating: v } : p))}
-              />
+            {/* ✅ editar las 6 estrellas */}
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
+
+              <Text style={{ color: theme.muted }}>General</Text>
+              <StarRating value={editingMeal?.ratingGeneral || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratingGeneral: v } : p))} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Saciada/o</Text>
+              <StarRating value={editingMeal?.q1 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q1: v } : p))} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Energía</Text>
+              <StarRating value={editingMeal?.q2 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q2: v } : p))} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Digestión</Text>
+              <StarRating value={editingMeal?.q3 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q3: v } : p))} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
+              <StarRating value={editingMeal?.q4 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q4: v } : p))} />
+
+              <View style={{ height: 8 }} />
+              <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
+              <StarRating value={editingMeal?.q5 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q5: v } : p))} />
             </View>
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
               <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
                 Cancelar
               </Button>
-              <Button
-                mode="contained"
-                onPress={saveMealEdit}
-                style={{ borderRadius: 12 }}
-                buttonColor={theme.violet}
-                textColor="#FFFFFF"
-              >
+              <Button mode="contained" onPress={saveMealEdit} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
                 Guardar cambios
               </Button>
             </View>
@@ -1189,7 +1293,7 @@ export default function PacienteHome({ email }: { email: string }) {
             <Text style={{ color: theme.muted, marginTop: 8, lineHeight: 20 }}>
               Nutricionista: <Text style={{ fontWeight: "900", color: theme.text }}>{selectedNutri?.name || "-"}</Text>
               {"\n"}Fecha: <Text style={{ fontWeight: "900", color: theme.text }}>{formatDateLabel(selectedDay)}</Text>
-              {"\n"}Hora: <Text style={{ fontWeight: "900", color: theme.text }}>{time}</Text>
+              {"\n"}Hora: <Text style={{ fontWeight: "900", color: theme.text }}>{normalizeTimeHHmm(time)}</Text>
             </Text>
 
             <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
