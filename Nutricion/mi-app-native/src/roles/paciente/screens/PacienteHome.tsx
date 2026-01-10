@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { View, ScrollView, Image, Dimensions } from "react-native";
+import {
+  View,
+  ScrollView,
+  Image,
+  Dimensions,
+  Platform,
+  Pressable,
+} from "react-native";
 import {
   Button,
   Card,
@@ -13,52 +20,53 @@ import {
   Provider as PaperProvider,
   Chip,
   Snackbar,
+  SegmentedButtons,
 } from "react-native-paper";
 import { signOut } from "firebase/auth";
-import {
-  onValue,
-  ref,
-  push,
-  set,
-  update,
-  remove,
-  get,
-  query,
-  orderByChild,
-  equalTo,
-  runTransaction,
-} from "firebase/database";
+import { onValue, ref, push, set, update, remove } from "firebase/database";
 import { Calendar } from "react-native-calendars";
 import { LineChart } from "react-native-gifted-charts";
+import { router } from "expo-router";
+import emailjs from "@emailjs/browser";
 
 import { auth, rtdb } from "../../../shared/services/firebase";
+import { bookAppointment, getBookedSlotsForNutri } from "../../../shared/services/appointments";
 
 type WeightItem = { id: string; value: number; date: string };
+
+type MealRatings = {
+  overall: number; // ⭐ general
+  satiety: number; // ¿qué tanto te llenó?
+  energy: number; // energía después
+  digestion: number; // digestión
+  cravings: number; // ansiedad/antojos
+  adherence: number; // qué tan fácil seguir el plan
+};
 
 type MealItem = {
   id: string;
   date: string;
   mealType: string;
   text: string;
-
-  // ✅ experiencia con 6 ratings
-  ratingGeneral: number; // antes era rating
-  q1: number;
-  q2: number;
-  q3: number;
-  q4: number;
-  q5: number;
+  ratings: MealRatings;
 };
 
-type NutriItem = { uid: string; name: string; email?: string; photoURL?: string };
-
-type AppointmentPatientItem = {
-  id: string;
-  nutriUid: string;
-  nutriName: string;
-  date: string;
-  time: string;
-  status: "pendiente" | "asistio" | "no_asistio" | "cancelado";
+type Nutri = {
+  uid: string;
+  name: string;
+  email: string;
+  photoURL?: string;
+  // availability opcional: si no está, usamos default 10-14
+  availability?: {
+    days?: Record<
+      string,
+      {
+        start?: string; // "10:00"
+        end?: string;   // "14:00"
+        breaks?: { start: string; end: string }[];
+      }
+    >;
+  };
 };
 
 const { width } = Dimensions.get("window");
@@ -66,8 +74,8 @@ const isWide = width >= 900;
 
 function formatDateLabel(iso: string) {
   if (!iso || !iso.includes("-")) return iso;
-  const [y, m, d] = iso.split("-");
-  return `${d}/${m}/${y}`;
+  const [, m, d] = iso.split("-");
+  return `${d}/${m}`;
 }
 
 function todayISO() {
@@ -78,38 +86,70 @@ function todayISO() {
   return `${y}-${m}-${day}`;
 }
 
-// Normaliza "9:0" -> "09:00"
-function normalizeTimeHHmm(v: string) {
-  const trimmed = (v || "").trim();
-  const parts = trimmed.split(":");
-  if (parts.length !== 2) return trimmed;
-  const hh = String(Number(parts[0])).padStart(2, "0");
-  const mm = String(Number(parts[1])).padStart(2, "0");
-  return `${hh}:${mm}`;
+function dayKeyFromISO(dateYYYYMMDD: string) {
+  // JS: 0=Sun ... 6=Sat
+  const [y, m, d] = dateYYYYMMDD.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  return keys[dt.getDay()];
 }
 
-function isValidTimeHHmm(v: string) {
-  if (!/^\d{2}:\d{2}$/.test(v)) return false;
-  const [hh, mm] = v.split(":").map(Number);
-  return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+function parseHHmm(s: string) {
+  const [h, m] = s.split(":").map(Number);
+  return { h, m };
+}
+
+function minutesOf(s: string) {
+  const { h, m } = parseHHmm(s);
+  return h * 60 + m;
+}
+
+function toHHmm(mins: number) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function buildSlots(start: string, end: string, stepMin: number) {
+  const a = minutesOf(start);
+  const b = minutesOf(end);
+  const out: string[] = [];
+  for (let t = a; t + stepMin <= b; t += stepMin) {
+    out.push(toHHmm(t));
+  }
+  return out;
+}
+
+function inBreak(time: string, breaks?: { start: string; end: string }[]) {
+  if (!breaks?.length) return false;
+  const t = minutesOf(time);
+  return breaks.some((br) => {
+    const a = minutesOf(br.start);
+    const b = minutesOf(br.end);
+    return t >= a && t < b;
+  });
 }
 
 function StarRating({
   value,
   onChange,
   size = 22,
+  color = "#F59E0B",
+  muted = "#D1D5DB",
 }: {
   value: number;
   onChange?: (v: number) => void;
   size?: number;
+  color?: string;
+  muted?: string;
 }) {
   return (
-    <View style={{ flexDirection: "row", gap: 2, alignItems: "center" }}>
+    <View style={{ flexDirection: "row", gap: 2, alignItems: "center", flexWrap: "wrap" }}>
       {[1, 2, 3, 4, 5].map((n) => (
         <IconButton
           key={n}
           icon={n <= value ? "star" : "star-outline"}
-          iconColor={n <= value ? "#F59E0B" : "#D1D5DB"}
+          iconColor={n <= value ? color : muted}
           size={size}
           onPress={onChange ? () => onChange(n) : undefined}
           style={{ margin: 0 }}
@@ -122,15 +162,15 @@ function StarRating({
 export default function PacienteHome({ email }: { email: string }) {
   const user = auth.currentUser;
 
+  // snack
   const [snack, setSnack] = useState<{ open: boolean; msg: string }>({ open: false, msg: "" });
   const toast = (msg: string) => setSnack({ open: true, msg });
-  const closeToast = () => setSnack({ open: false, msg: "" });
 
   // Perfil
-  const [name, setName] = useState<string>("");
-  const [phone, setPhone] = useState<string>("");
-  const [obraSocial, setObraSocial] = useState<string>("");
-  const [photoURL, setPhotoURL] = useState<string>("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [obraSocial, setObraSocial] = useState("");
+  const [photoURL, setPhotoURL] = useState("");
 
   // Pesos
   const [weights, setWeights] = useState<WeightItem[]>([]);
@@ -141,55 +181,56 @@ export default function PacienteHome({ email }: { email: string }) {
   // Comidas
   const [meals, setMeals] = useState<MealItem[]>([]);
   const [openMealModal, setOpenMealModal] = useState(false);
+
   const [mealDate, setMealDate] = useState(todayISO());
   const [mealType, setMealType] = useState("Desayuno");
   const [mealText, setMealText] = useState("");
 
-  // ✅ experiencia con 6 preguntas
-  const [ratingGeneral, setRatingGeneral] = useState(4);
-  const [q1, setQ1] = useState(4);
-  const [q2, setQ2] = useState(4);
-  const [q3, setQ3] = useState(4);
-  const [q4, setQ4] = useState(4);
-  const [q5, setQ5] = useState(4);
+  const [mealRatings, setMealRatings] = useState<MealRatings>({
+    overall: 4,
+    satiety: 4,
+    energy: 4,
+    digestion: 4,
+    cravings: 4,
+    adherence: 4,
+  });
 
+  // Edit comida
   const [editingMeal, setEditingMeal] = useState<MealItem | null>(null);
 
   // Turnos
-  const [nutris, setNutris] = useState<NutriItem[]>([]);
-  const [selectedNutri, setSelectedNutri] = useState<NutriItem | null>(null);
-
   const [selectedDay, setSelectedDay] = useState(todayISO());
-  const [time, setTime] = useState("15:00");
+  const [nutris, setNutris] = useState<Nutri[]>([]);
+  const [selectedNutriUid, setSelectedNutriUid] = useState<string>("");
+  const selectedNutri = useMemo(
+    () => nutris.find((n) => n.uid === selectedNutriUid) || null,
+    [nutris, selectedNutriUid]
+  );
 
-  const [openCreateAppt, setOpenCreateAppt] = useState(false);
-  const [busyCreate, setBusyCreate] = useState(false);
+  const [timeFilter, setTimeFilter] = useState<"all" | "morning" | "afternoon">("all");
 
-  const [myAppointments, setMyAppointments] = useState<AppointmentPatientItem[]>([]);
+  const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set());
+  const [myBookedToday, setMyBookedToday] = useState<Set<string>>(new Set()); // `${nutriUid}|${time}`
+  const [creating, setCreating] = useState(false);
 
-  // ===== THEME PRO =====
+  // ===== Theme =====
   const theme = useMemo(
     () => ({
       violet: "#6D28D9",
       violet2: "#8B5CF6",
       violetSoft: "#F3E8FF",
       violetRing: "#DDD6FE",
-
       pageBg: "#F8FAFC",
       surface: "#FFFFFF",
       border: "#E5E7EB",
       border2: "#EEF2F7",
-
       text: "#0F172A",
       muted: "#64748B",
-
       headerBg: "#000000",
       headerBorder: "#111827",
       headerText: "#F9FAFB",
       headerMuted: "#CBD5E1",
-
       danger: "#EF4444",
-
       shadow: {
         shadowColor: "#000",
         shadowOpacity: 0.08,
@@ -222,6 +263,14 @@ export default function PacienteHome({ email }: { email: string }) {
         borderColor: theme.violetRing,
         backgroundColor: theme.violetSoft,
       } as any,
+      primaryBtn: {
+        borderRadius: 14,
+        backgroundColor: theme.violet,
+      } as any,
+      secondaryBtn: {
+        borderRadius: 14,
+        borderColor: theme.violet,
+      } as any,
       subtleDivider: { backgroundColor: theme.border2 } as any,
       hero: {
         borderRadius: 22,
@@ -230,31 +279,26 @@ export default function PacienteHome({ email }: { email: string }) {
         borderColor: theme.violetRing,
         backgroundColor: theme.violetSoft,
       } as any,
-
-      btnPrimary: { borderRadius: 14 } as any,
-      btnPrimaryColor: theme.violet,
-      btnPrimaryText: "#FFFFFF",
-
-      btnOutline: { borderRadius: 14, borderColor: theme.violet } as any,
-      btnOutlineText: theme.violet,
     }),
     [theme]
   );
 
-  // Calendar marks
+  // MarkedDates para Calendar (no rompe)
   const markedDates = useMemo(() => {
     const marks: any = {};
     marks[selectedDay] = { selected: true, selectedColor: theme.violet };
     return marks;
   }, [selectedDay, theme.violet]);
 
-  // ===== Cargar datos existentes =====
+  // ===== Cargar perfil + weights + meals + nutris + mis turnos del día =====
   useEffect(() => {
     if (!user) return;
 
     const userRef = ref(rtdb, `users/${user.uid}`);
     const weightsRef = ref(rtdb, `weights/${user.uid}`);
     const mealsRef = ref(rtdb, `meals/${user.uid}`);
+    const usersRef = ref(rtdb, `users`);
+    const myApptsRef = ref(rtdb, `appointmentsByPatient/${user.uid}`);
 
     const unsubUser = onValue(userRef, (snap) => {
       const data = snap.val() || {};
@@ -275,103 +319,116 @@ export default function PacienteHome({ email }: { email: string }) {
       setWeights(list);
     });
 
-    // ✅ comidas: soporta el modelo viejo (rating) y el nuevo (ratingGeneral + q1..q5)
     const unsubMeals = onValue(mealsRef, (snap) => {
       const val = snap.val() || {};
       const list: MealItem[] = Object.keys(val).map((id) => {
-        const item = val[id] || {};
-        const oldRating = Number(item?.rating ?? 0);
-
+        const raw = val[id] || {};
+        const legacyRating = Number(raw?.rating ?? 0); // por si tenías el viejo formato
+        const ratings: MealRatings = {
+          overall: Number(raw?.ratings?.overall ?? legacyRating ?? 0),
+          satiety: Number(raw?.ratings?.satiety ?? 0),
+          energy: Number(raw?.ratings?.energy ?? 0),
+          digestion: Number(raw?.ratings?.digestion ?? 0),
+          cravings: Number(raw?.ratings?.cravings ?? 0),
+          adherence: Number(raw?.ratings?.adherence ?? 0),
+        };
         return {
           id,
-          date: String(item?.date ?? ""),
-          mealType: String(item?.mealType ?? ""),
-          text: String(item?.text ?? ""),
-
-          ratingGeneral: Number(item?.ratingGeneral ?? oldRating ?? 0),
-          q1: Number(item?.q1 ?? oldRating ?? 0),
-          q2: Number(item?.q2 ?? oldRating ?? 0),
-          q3: Number(item?.q3 ?? oldRating ?? 0),
-          q4: Number(item?.q4 ?? oldRating ?? 0),
-          q5: Number(item?.q5 ?? oldRating ?? 0),
+          date: String(raw?.date ?? ""),
+          mealType: String(raw?.mealType ?? ""),
+          text: String(raw?.text ?? ""),
+          ratings,
         };
       });
-
-      list.sort((a, b) => (a.date > b.date ? -1 : 1));
+      list.sort((a, b) => (a.date > b.date ? -1 : 1)); // desc
       setMeals(list);
+    });
+
+    // Nutricionistas (role == "nutricionista")
+    const unsubUsers = onValue(usersRef, (snap) => {
+      const all = snap.val() || {};
+      const list: Nutri[] = Object.keys(all)
+        .map((uid) => ({ uid, ...(all[uid] || {}) }))
+        .filter((u: any) => u?.role === "nutricionista")
+        .map((u: any) => ({
+          uid: u.uid,
+          name: u.name || u.email?.split("@")?.[0] || "Nutricionista",
+          email: u.email || "",
+          photoURL: u.photoURL || "",
+          availability: u.availability || undefined,
+        }));
+
+      setNutris(list);
+
+      // autoselect
+      if (!selectedNutriUid && list.length) setSelectedNutriUid(list[0].uid);
+    });
+
+    // Mis turnos del día seleccionado (para bloquear duplicado)
+    const unsubMyAppts = onValue(myApptsRef, (snap) => {
+      const val = snap.val() || {};
+      const setLocal = new Set<string>();
+      Object.keys(val).forEach((id) => {
+        const a = val[id];
+        if (!a) return;
+        // guardo todo, filtramos por día al reservar
+        const key = `${a.nutriUid}|${a.date}|${a.time}|${a.status}`;
+        // no lo uso como key final, solo para calcular luego (abajo)
+      });
+      // acá no hacemos nada todavía, porque depende de selectedDay
     });
 
     return () => {
       unsubUser();
       unsubWeights();
       unsubMeals();
+      unsubUsers();
+      unsubMyAppts();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  // ===== Nutricionistas: role === "nutricionista" =====
-  useEffect(() => {
-    const q = query(ref(rtdb, "users"), orderByChild("role"), equalTo("nutricionista"));
-    const unsub = onValue(q, (snap) => {
-      const val = snap.val() || {};
-      const list: NutriItem[] = Object.keys(val).map((uid) => ({
-        uid,
-        name: val[uid]?.name || val[uid]?.email?.split("@")?.[0] || "Nutricionista",
-        email: val[uid]?.email || "",
-        photoURL: val[uid]?.photoURL || "",
-      }));
-      list.sort((a, b) => a.name.localeCompare(b.name));
-      setNutris(list);
-      setSelectedNutri((prev) => prev ?? list[0] ?? null);
-    });
-
-    return () => unsub();
-  }, []);
-
-  // ===== Mis turnos (index por paciente) =====
+  // Mis turnos del día (reactivo a selectedDay) + evitar duplicado
   useEffect(() => {
     if (!user) return;
-
-    const idxRef = ref(rtdb, `appointmentsByPatient/${user.uid}`);
-    const unsub = onValue(idxRef, (snap) => {
+    const myApptsRef = ref(rtdb, `appointmentsByPatient/${user.uid}`);
+    const unsub = onValue(myApptsRef, (snap) => {
       const val = snap.val() || {};
-      const list: AppointmentPatientItem[] = Object.keys(val).map((id) => ({
-        id,
-        nutriUid: String(val[id]?.nutriUid || ""),
-        nutriName: String(val[id]?.nutriName || "Nutricionista"),
-        date: String(val[id]?.date || ""),
-        time: String(val[id]?.time || ""),
-        status: (val[id]?.status || "pendiente") as any,
-      }));
-
-      list.sort((a, b) => {
-        const ka = `${a.date} ${a.time}`;
-        const kb = `${b.date} ${b.time}`;
-        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      const setToday = new Set<string>();
+      Object.keys(val).forEach((id) => {
+        const a = val[id];
+        if (!a) return;
+        if (a.date !== selectedDay) return;
+        if (a.status === "cancelado") return;
+        setToday.add(`${a.nutriUid}|${a.time}`);
       });
-
-      setMyAppointments(list);
+      setMyBookedToday(setToday);
     });
-
     return () => unsub();
-  }, [user]);
+  }, [user, selectedDay]);
 
-  // ===== Gráfico =====
+  // Slots ocupados del nutri seleccionado + día seleccionado
+  useEffect(() => {
+    (async () => {
+      if (!selectedNutriUid) return;
+      const setBooked = await getBookedSlotsForNutri(selectedNutriUid, selectedDay);
+      setBookedSlots(setBooked);
+    })().catch(() => {});
+  }, [selectedNutriUid, selectedDay]);
+
+  // ===== Chart data =====
   const chartData = useMemo(() => {
     return weights
       .filter((w) => w.date && !Number.isNaN(w.value) && w.value > 0)
-      .map((w) => ({
-        value: w.value,
-        label: w.date ? w.date.slice(5).split("-").reverse().join("/") : "",
-      }));
+      .map((w) => ({ value: w.value, label: formatDateLabel(w.date) }));
   }, [weights]);
 
   const chartMax = useMemo(() => {
-    if (chartData.length === 0) return 0;
-    const max = Math.max(...chartData.map((d) => d.value));
-    return max + 2;
+    if (!chartData.length) return 0;
+    return Math.max(...chartData.map((d) => d.value)) + 2;
   }, [chartData]);
 
-  // ===== Acciones =====
+  // ===== Helpers =====
   async function saveProfile() {
     if (!user) return;
     await update(ref(rtdb, `users/${user.uid}`), {
@@ -389,18 +446,15 @@ export default function PacienteHome({ email }: { email: string }) {
       toast("Ingresá un peso válido.");
       return;
     }
-
     const listRef = ref(rtdb, `weights/${user.uid}`);
     const newRef = push(listRef);
     await set(newRef, { value, date: newWeightDate });
-
     setOpenWeightModal(false);
     setNewWeight("");
     setNewWeightDate(todayISO());
     toast("Peso registrado ✅");
   }
 
-  // ✅ Comidas con 6 ratings
   async function addMeal() {
     if (!user) return;
     if (!mealText.trim()) {
@@ -410,51 +464,38 @@ export default function PacienteHome({ email }: { email: string }) {
 
     const listRef = ref(rtdb, `meals/${user.uid}`);
     const newRef = push(listRef);
+
     await set(newRef, {
       date: mealDate,
       mealType,
       text: mealText.trim(),
-
-      ratingGeneral,
-      q1,
-      q2,
-      q3,
-      q4,
-      q5,
+      ratings: mealRatings,
     });
 
     setOpenMealModal(false);
     setMealText("");
     setMealType("Desayuno");
     setMealDate(todayISO());
-
-    // resetea estrellas
-    setRatingGeneral(4);
-    setQ1(4);
-    setQ2(4);
-    setQ3(4);
-    setQ4(4);
-    setQ5(4);
+    setMealRatings({
+      overall: 4,
+      satiety: 4,
+      energy: 4,
+      digestion: 4,
+      cravings: 4,
+      adherence: 4,
+    });
 
     toast("Comida guardada ✅");
   }
 
   async function saveMealEdit() {
     if (!user || !editingMeal) return;
-
     await update(ref(rtdb, `meals/${user.uid}/${editingMeal.id}`), {
       date: editingMeal.date,
       mealType: editingMeal.mealType,
       text: editingMeal.text,
-
-      ratingGeneral: editingMeal.ratingGeneral,
-      q1: editingMeal.q1,
-      q2: editingMeal.q2,
-      q3: editingMeal.q3,
-      q4: editingMeal.q4,
-      q5: editingMeal.q5,
+      ratings: editingMeal.ratings,
     });
-
     setEditingMeal(null);
     toast("Comida actualizada ✅");
   }
@@ -465,163 +506,133 @@ export default function PacienteHome({ email }: { email: string }) {
     toast("Comida eliminada 🗑️");
   }
 
-  // ✅ TURNOS: bloqueo global por slots/{nutriUid}/{date}/{hhmm}
-  async function createAppointment() {
+  function sendAppointmentEmail(params: {
+    to_email: string;
+    patient_name: string;
+    nutritionist_name: string;
+    date: string;
+    time: string;
+  }) {
+    const serviceId = process.env.EXPO_PUBLIC_EMAILJS_SERVICE_ID;
+    const templateId = process.env.EXPO_PUBLIC_EMAILJS_TEMPLATE_ID;
+    const publicKey = process.env.EXPO_PUBLIC_EMAILJS_PUBLIC_KEY;
+
+    if (!serviceId || !templateId || !publicKey) return;
+
+    // EmailJS es para web. En mobile no lo enviamos (pero no rompe nada).
+    if (Platform.OS !== "web") return;
+
+    emailjs
+      .send(
+        serviceId,
+        templateId,
+        {
+          to_email: params.to_email,
+          patient_name: params.patient_name,
+          nutritionist_name: params.nutritionist_name,
+          date: params.date,
+          time: params.time,
+        },
+        { publicKey }
+      )
+      .catch(() => {});
+  }
+
+  // availability por día: si no hay -> default 10:00–14:00 sin breaks
+  const dayAvailability = useMemo(() => {
+    const dayKey = dayKeyFromISO(selectedDay);
+    const av = selectedNutri?.availability?.days?.[dayKey];
+    const start = av?.start || "10:00";
+    const end = av?.end || "14:00";
+    const breaks = av?.breaks || [];
+    return { start, end, breaks };
+  }, [selectedDay, selectedNutri]);
+
+  const allSlots = useMemo(() => {
+    const base = buildSlots(dayAvailability.start, dayAvailability.end, 30);
+    return base.filter((t) => !inBreak(t, dayAvailability.breaks));
+  }, [dayAvailability]);
+
+  const filteredSlots = useMemo(() => {
+    const slots = allSlots;
+    if (timeFilter === "all") return slots;
+    return slots.filter((t) => {
+      const hh = Number(t.split(":")[0]);
+      if (timeFilter === "morning") return hh < 12;
+      return hh >= 12;
+    });
+  }, [allSlots, timeFilter]);
+
+  async function bookSlot(time: string) {
     if (!user) return;
     if (!selectedNutri) {
-      toast("Elegí un nutricionista.");
+      toast('No hay nutricionistas cargados (role="nutricionista").');
       return;
     }
 
-    const hhmm = normalizeTimeHHmm(time);
-    setTime(hhmm);
-
-    if (!isValidTimeHHmm(hhmm)) {
-      toast("Hora inválida. Usá HH:MM (ej 15:30).");
+    // evitar que el mismo paciente reserve dos veces el mismo slot con ese nutri ese día
+    const myKey = `${selectedNutri.uid}|${time}`;
+    if (myBookedToday.has(myKey)) {
+      toast("Ya solicitaste ese horario con este nutricionista hoy. Elegí otro.");
       return;
     }
 
-    setBusyCreate(true);
+    // ocupado por alguien más
+    if (bookedSlots.has(time)) {
+      toast("Ese horario ya está reservado. Elegí otro.");
+      return;
+    }
+
+    setCreating(true);
     try {
-      const nutriUid = selectedNutri.uid;
-      const date = selectedDay;
+      const appt = await bookAppointment({
+        patientUid: user.uid,
+        patientName: name || "Paciente",
+        patientEmail: user.email || email,
 
-      // ✅ clave única global del turno
-      const slotRef = ref(rtdb, `slots/${nutriUid}/${date}/${hhmm}`);
+        nutriUid: selectedNutri.uid,
+        nutriName: selectedNutri.name,
+        nutriEmail: selectedNutri.email || "",
 
-      // Transaction: si ya existe algo, aborta.
-      const tx = await runTransaction(
-        slotRef,
-        (current) => {
-          if (current === null) return true; // reservar
-          return; // abort
-        },
-        { applyLocally: false }
-      );
+        date: selectedDay,
+        time,
+        durationMin: 30,
+      });
 
-      if (!tx.committed) {
-        toast("Ese horario ya está ocupado. Elegí otra hora.");
-        return;
+      // UI optimistic
+      setBookedSlots((prev) => new Set([...Array.from(prev), time]));
+      setMyBookedToday((prev) => new Set([...Array.from(prev), myKey]));
+
+      // email
+      sendAppointmentEmail({
+        to_email: appt.patientEmail,
+        patient_name: appt.patientName,
+        nutritionist_name: appt.nutriName,
+        date: appt.date,
+        time: appt.time,
+      });
+
+      toast(`Turno solicitado ✅ ${selectedNutri.name} · ${selectedDay} ${time}`);
+    } catch (e: any) {
+      if (e?.code === "SLOT_TAKEN") {
+        toast("Ese horario se reservó recién. Elegí otro.");
+        // re-sync
+        const setBooked = await getBookedSlotsForNutri(selectedNutri.uid, selectedDay);
+        setBookedSlots(setBooked);
+      } else {
+        console.error(e);
+        toast("No se pudo solicitar el turno. Intentá de nuevo.");
       }
-
-      // ✅ Si reservó el slot, recién ahora creamos el turno
-      const apptRef = push(ref(rtdb, "appointments"));
-      const apptId = apptRef.key!;
-
-      const patientName = name || email?.split("@")?.[0] || "Paciente";
-      const nutriName = selectedNutri.name || "Nutricionista";
-      const createdAt = Date.now();
-
-      const updates: any = {};
-      updates[`appointments/${apptId}`] = {
-        patientUid: user.uid,
-        patientName,
-        nutriUid,
-        nutriName,
-        date,
-        time: hhmm,
-        status: "pendiente",
-        createdAt,
-      };
-      updates[`appointmentsByPatient/${user.uid}/${apptId}`] = {
-        nutriUid,
-        nutriName,
-        date,
-        time: hhmm,
-        status: "pendiente",
-      };
-      updates[`appointmentsByNutri/${nutriUid}/${apptId}`] = {
-        patientUid: user.uid,
-        patientName,
-        date,
-        time: hhmm,
-        status: "pendiente",
-      };
-
-      // guardamos el id del turno en el slot (útil para debug)
-      updates[`slots/${nutriUid}/${date}/${hhmm}`] = apptId;
-
-      await update(ref(rtdb), updates);
-
-      setOpenCreateAppt(false);
-      toast("Turno solicitado ✅");
-    } catch (e) {
-      console.log(e);
-      toast("No se pudo crear el turno. Probá de nuevo.");
     } finally {
-      setBusyCreate(false);
+      setCreating(false);
     }
   }
 
-  async function cancelMyAppointment(item: AppointmentPatientItem) {
-    if (!user) return;
-
-    try {
-      const apptId = item.id;
-      const snap = await get(ref(rtdb, `appointments/${apptId}`));
-      const appt = snap.val();
-
-      if (!appt) {
-        toast("No se encontró el turno.");
-        return;
-      }
-
-      const nutriUid = appt.nutriUid;
-      const date = appt.date;
-      const hhmm = appt.time;
-
-      const updates: any = {};
-      updates[`appointments/${apptId}/status`] = "cancelado";
-      updates[`appointmentsByPatient/${user.uid}/${apptId}/status`] = "cancelado";
-      updates[`appointmentsByNutri/${nutriUid}/${apptId}/status`] = "cancelado";
-      updates[`slots/${nutriUid}/${date}/${hhmm}`] = null; // libera slot
-
-      await update(ref(rtdb), updates);
-      toast("Turno cancelado 🗑️");
-    } catch (e) {
-      console.log(e);
-      toast("No se pudo cancelar.");
-    }
-  }
-
-  function statusPill(status: AppointmentPatientItem["status"]) {
-    const map = {
-      pendiente: { label: "Pendiente", bg: theme.violetSoft, fg: "#4C1D95", bd: theme.violetRing },
-      asistio: { label: "Asistió", bg: "#DCFCE7", fg: "#166534", bd: "#BBF7D0" },
-      no_asistio: { label: "No asistió", bg: "#FEF3C7", fg: "#92400E", bd: "#FDE68A" },
-      cancelado: { label: "Cancelado", bg: "#FEE2E2", fg: "#991B1B", bd: "#FECACA" },
-    }[status];
-
-    return (
-      <View
-        style={{
-          paddingHorizontal: 10,
-          paddingVertical: 4,
-          borderRadius: 999,
-          backgroundColor: map.bg,
-          borderWidth: 1,
-          borderColor: map.bd,
-          alignSelf: "flex-start",
-          marginTop: 8,
-        }}
-      >
-        <Text style={{ color: map.fg, fontSize: 12, fontWeight: "800" }}>{map.label}</Text>
-      </View>
-    );
-  }
-
-  if (!user) {
-    return (
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-        <Text>Cargando usuario...</Text>
-      </View>
-    );
-  }
-
+  // ===== UI =====
   return (
     <PaperProvider>
       <View style={{ flex: 1, backgroundColor: theme.pageBg }}>
-        {/* HEADER (NEGRO) */}
+        {/* HEADER */}
         <View
           style={{
             height: 74,
@@ -634,21 +645,36 @@ export default function PacienteHome({ email }: { email: string }) {
             borderColor: theme.headerBorder,
           }}
         >
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            <Image source={require("../../../../assets/images/icon.png")} style={{ width: 34, height: 34, borderRadius: 12 }} />
+          <Pressable
+            onPress={() => router.replace("/(public)")}
+            style={{ flexDirection: "row", alignItems: "center", gap: 10 }}
+          >
+            <Image
+              source={require("../../../../assets/images/icon.png")}
+              style={{ width: 34, height: 34, borderRadius: 12 }}
+            />
             <View>
               <Text variant="titleMedium" style={{ color: theme.headerText, fontWeight: "800" }}>
                 NutriCare
               </Text>
-              <Text style={{ color: theme.headerMuted, marginTop: -2, fontSize: 12 }}>Panel Paciente</Text>
+              <Text style={{ color: theme.headerMuted, marginTop: -2, fontSize: 12 }}>
+                Panel Paciente
+              </Text>
             </View>
-          </View>
+          </Pressable>
 
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            {photoURL ? <Avatar.Image size={36} source={{ uri: photoURL }} /> : <Avatar.Text size={36} label={(name || "P")[0]?.toUpperCase()} />}
+            {photoURL ? (
+              <Avatar.Image size={36} source={{ uri: photoURL }} />
+            ) : (
+              <Avatar.Text size={36} label={(name || "P")[0]?.toUpperCase()} />
+            )}
+
             <View style={{ alignItems: "flex-end" }}>
-              <Text style={{ fontWeight: "800", color: theme.headerText, lineHeight: 18 }}>{name || "Paciente"}</Text>
-              <Text style={{ color: theme.headerMuted, fontSize: 11 }}>{email}</Text>
+              <Text style={{ fontWeight: "800", color: theme.headerText, lineHeight: 18 }}>
+                {name || "Paciente"}
+              </Text>
+              <Text style={{ color: theme.headerMuted, fontSize: 11 }}>{user?.email || email}</Text>
             </View>
 
             <Button mode="text" textColor="#FCA5A5" onPress={() => signOut(auth)}>
@@ -660,14 +686,16 @@ export default function PacienteHome({ email }: { email: string }) {
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 40 }}>
           {/* HERO */}
           <View style={styles.hero}>
-            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>Hola, {name || "Paciente"} 👋</Text>
+            <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
+              Hola, {name || "Paciente"} 👋
+            </Text>
             <Text style={{ color: "#5B21B6", marginTop: 6, lineHeight: 20 }}>
-              Tu panel para registrar comidas, progreso y gestionar turnos.
+              Registrá comidas, progreso y turnos con tu nutricionista.
             </Text>
 
             <View style={{ marginTop: 12, flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
               <Chip style={styles.pill} textStyle={{ color: "#4C1D95", fontWeight: "700" }}>
-                Turnos: {myAppointments.length}
+                Peso: {weights.length ? `${weights[weights.length - 1].value} kg` : "—"}
               </Chip>
               <Chip
                 style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
@@ -679,17 +707,21 @@ export default function PacienteHome({ email }: { email: string }) {
                 style={{ borderRadius: 999, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}
                 textStyle={{ color: theme.text, fontWeight: "700" }}
               >
-                Pesos: {weights.length ? `${weights[weights.length - 1].value} kg` : "—"}
+                Turnos: 30min
               </Chip>
             </View>
           </View>
 
-          {/* PERFIL + ACCIONES */}
+          {/* GRID TOP */}
           <View style={{ marginTop: 12, flexDirection: isWide ? "row" : "column", gap: 12 }}>
+            {/* PERFIL */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Datos del perfil</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>Mantené tu info actualizada.</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>
+                  Mantené tus datos actualizados para tu seguimiento.
+                </Text>
+
                 <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
 
                 <TextInput
@@ -697,7 +729,7 @@ export default function PacienteHome({ email }: { email: string }) {
                   value={name}
                   onChangeText={setName}
                   mode="outlined"
-                  style={{ marginBottom: 10, backgroundColor: "#FFF" }}
+                  style={{ marginBottom: 10, backgroundColor: "#FFFFFF" }}
                   outlineColor={theme.border}
                   activeOutlineColor={theme.violet}
                   textColor={theme.text}
@@ -708,7 +740,7 @@ export default function PacienteHome({ email }: { email: string }) {
                   onChangeText={setPhone}
                   keyboardType="phone-pad"
                   mode="outlined"
-                  style={{ marginBottom: 10, backgroundColor: "#FFF" }}
+                  style={{ marginBottom: 10, backgroundColor: "#FFFFFF" }}
                   outlineColor={theme.border}
                   activeOutlineColor={theme.violet}
                   textColor={theme.text}
@@ -718,43 +750,42 @@ export default function PacienteHome({ email }: { email: string }) {
                   value={obraSocial}
                   onChangeText={setObraSocial}
                   mode="outlined"
-                  style={{ marginBottom: 10, backgroundColor: "#FFF" }}
+                  style={{ marginBottom: 10, backgroundColor: "#FFFFFF" }}
                   outlineColor={theme.border}
                   activeOutlineColor={theme.violet}
                   textColor={theme.text}
                 />
 
-                <Button
-                  mode="contained"
-                  style={styles.btnPrimary}
-                  buttonColor={styles.btnPrimaryColor}
-                  textColor={styles.btnPrimaryText}
-                  onPress={saveProfile}
-                >
+                <Button mode="contained" style={styles.primaryBtn} textColor="#FFFFFF" onPress={saveProfile}>
                   Guardar datos
                 </Button>
               </Card.Content>
             </Card>
 
+            {/* ACCIONES */}
             <Card style={{ flex: 1, ...styles.sectionCard }}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Acciones rápidas</Text>
                 <Text style={{ color: theme.muted, marginTop: 6, lineHeight: 22 }}>
-                  Registrá tu progreso y mantené consistencia.
+                  Cargá peso y comidas para ver tu progreso en el gráfico.
                 </Text>
 
                 <View style={{ flexDirection: "row", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
                   <Button
                     mode="contained"
-                    style={styles.btnPrimary}
-                    buttonColor={styles.btnPrimaryColor}
-                    textColor={styles.btnPrimaryText}
+                    style={styles.primaryBtn}
+                    textColor="#FFFFFF"
                     onPress={() => setOpenWeightModal(true)}
                   >
                     Medir peso
                   </Button>
 
-                  <Button mode="outlined" style={styles.btnOutline} textColor={styles.btnOutlineText} onPress={() => setOpenMealModal(true)}>
+                  <Button
+                    mode="outlined"
+                    style={styles.secondaryBtn}
+                    textColor={theme.violet}
+                    onPress={() => setOpenMealModal(true)}
+                  >
                     Agregar comida
                   </Button>
                 </View>
@@ -770,19 +801,19 @@ export default function PacienteHome({ email }: { email: string }) {
                   }}
                 >
                   <Text style={{ color: theme.muted, lineHeight: 20 }}>
-                    Tip: Cargá comidas y peso seguido para ver tu progreso más claro 📈
+                    Tip: cuanto más constante seas, más claro se ve tu avance 📈
                   </Text>
                 </View>
               </Card.Content>
             </Card>
           </View>
 
-          {/* PROGRESO PESO */}
+          {/* GRAFICO */}
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Progreso de peso</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>Visualizá tu evolución por fecha.</Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>Evolución por fecha.</Text>
 
                 <View style={{ marginTop: 12 }}>
                   {chartData.length >= 2 ? (
@@ -825,7 +856,9 @@ export default function PacienteHome({ email }: { email: string }) {
                         borderColor: theme.border2,
                       }}
                     >
-                      <Text style={{ color: theme.muted }}>Cargá al menos 2 registros de peso para ver el gráfico.</Text>
+                      <Text style={{ color: theme.muted }}>
+                        Cargá al menos 2 registros de peso para ver el gráfico.
+                      </Text>
                     </View>
                   )}
                 </View>
@@ -833,21 +866,22 @@ export default function PacienteHome({ email }: { email: string }) {
             </Card>
           </View>
 
-          {/* COMIDAS */}
+          {/* COMIDAS (SCROLL INTERNO) */}
           <View style={{ marginTop: 12 }}>
             <Card style={styles.sectionCard}>
               <Card.Content>
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                  <View>
+                  <View style={{ flex: 1, paddingRight: 10 }}>
                     <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas</Text>
-                    <Text style={{ color: theme.muted, marginTop: 4 }}>Historial por fecha con experiencia ⭐</Text>
+                    <Text style={{ color: theme.muted, marginTop: 4 }}>
+                      Historial por fecha + encuesta con estrellas
+                    </Text>
                   </View>
 
                   <Button
                     mode="contained"
-                    style={styles.btnPrimary}
-                    buttonColor={styles.btnPrimaryColor}
-                    textColor={styles.btnPrimaryText}
+                    style={styles.primaryBtn}
+                    textColor="#FFFFFF"
                     onPress={() => setOpenMealModal(true)}
                   >
                     Agregar
@@ -859,60 +893,69 @@ export default function PacienteHome({ email }: { email: string }) {
                 {meals.length === 0 ? (
                   <Text style={{ color: theme.muted }}>Todavía no cargaste comidas. Tocá “Agregar”.</Text>
                 ) : (
-                  <View style={{ gap: 10 }}>
-                    {meals.map((m) => (
-                      <Card key={m.id} style={styles.innerCard}>
-                        <Card.Content>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
-                            <View style={{ flex: 1, paddingRight: 8 }}>
-                              <Text style={{ fontWeight: "900", color: theme.text }}>
-                                {formatDateLabel(m.date)} · {m.mealType}
-                              </Text>
+                  <View
+                    style={{
+                      maxHeight: 420, // ✅ limita el alto para que no tape calendario
+                    }}
+                  >
+                    <ScrollView nestedScrollEnabled showsVerticalScrollIndicator>
+                      <View style={{ gap: 10, paddingBottom: 6 }}>
+                        {meals.map((m) => (
+                          <Card key={m.id} style={{ ...styles.innerCard }}>
+                            <Card.Content>
+                              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <View style={{ flex: 1, paddingRight: 8 }}>
+                                  <Text style={{ fontWeight: "900", color: theme.text }}>
+                                    {formatDateLabel(m.date)} · {m.mealType}
+                                  </Text>
 
-                              <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
+                                  <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>
+                                    {m.text}
+                                  </Text>
 
-                              {/* ✅ Experiencia con 6 preguntas */}
-                              <View style={{ marginTop: 12 }}>
-                                <Text style={{ color: theme.text, fontWeight: "900", marginBottom: 6 }}>Experiencia</Text>
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>
+                                      ⭐ Experiencia general
+                                    </Text>
+                                    <StarRating value={m.ratings.overall} />
+                                  </View>
 
-                                <Text style={{ color: theme.muted }}>General</Text>
-                                <StarRating value={m.ratingGeneral} />
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>1) ¿Qué tanto te llenó?</Text>
+                                    <StarRating value={m.ratings.satiety} />
+                                  </View>
 
-                                <View style={{ height: 8 }} />
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>2) Energía después</Text>
+                                    <StarRating value={m.ratings.energy} />
+                                  </View>
 
-                                <Text style={{ color: theme.muted }}>Saciada/o</Text>
-                                <StarRating value={m.q1} />
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>3) Digestión</Text>
+                                    <StarRating value={m.ratings.digestion} />
+                                  </View>
 
-                                <View style={{ height: 8 }} />
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>4) Antojos/ansiedad</Text>
+                                    <StarRating value={m.ratings.cravings} />
+                                  </View>
 
-                                <Text style={{ color: theme.muted }}>Energía</Text>
-                                <StarRating value={m.q2} />
+                                  <View style={{ marginTop: 10 }}>
+                                    <Text style={{ color: theme.text, fontWeight: "900" }}>5) Adherencia al plan</Text>
+                                    <StarRating value={m.ratings.adherence} />
+                                  </View>
+                                </View>
 
-                                <View style={{ height: 8 }} />
-
-                                <Text style={{ color: theme.muted }}>Digestión</Text>
-                                <StarRating value={m.q3} />
-
-                                <View style={{ height: 8 }} />
-
-                                <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
-                                <StarRating value={m.q4} />
-
-                                <View style={{ height: 8 }} />
-
-                                <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
-                                <StarRating value={m.q5} />
+                                <View style={{ flexDirection: "row" }}>
+                                  <IconButton icon="pencil" iconColor={theme.violet} onPress={() => setEditingMeal({ ...m })} />
+                                  <IconButton icon="trash-can-outline" iconColor={theme.danger} onPress={() => deleteMeal(m.id)} />
+                                </View>
                               </View>
-                            </View>
-
-                            <View style={{ flexDirection: "row" }}>
-                              <IconButton icon="pencil" iconColor={theme.violet} onPress={() => setEditingMeal({ ...m })} />
-                              <IconButton icon="trash-can-outline" iconColor={theme.danger} onPress={() => deleteMeal(m.id)} />
-                            </View>
-                          </View>
-                        </Card.Content>
-                      </Card>
-                    ))}
+                            </Card.Content>
+                          </Card>
+                        ))}
+                      </View>
+                    </ScrollView>
                   </View>
                 )}
               </Card.Content>
@@ -924,36 +967,9 @@ export default function PacienteHome({ email }: { email: string }) {
             <Card style={styles.sectionCard}>
               <Card.Content>
                 <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Turnos</Text>
-                <Text style={{ color: theme.muted, marginTop: 6 }}>
-                  Se bloquea por nutricionista + fecha + hora. Si alguien ya lo pidió, no te deja.
+                <Text style={{ color: theme.muted, marginTop: 6, lineHeight: 20 }}>
+                  Elegí nutricionista, día y horario (cada 30 min). Si está ocupado, no te deja reservar.
                 </Text>
-
-                <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
-
-                {nutris.length === 0 ? (
-                  <Text style={{ color: theme.muted }}>No hay nutricionistas cargados (role="nutricionista").</Text>
-                ) : (
-                  <View style={{ gap: 10 }}>
-                    <Text style={{ fontWeight: "900", color: theme.text }}>Nutricionista</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-                      {nutris.map((n) => {
-                        const active = selectedNutri?.uid === n.uid;
-                        return (
-                          <Button
-                            key={n.uid}
-                            mode={active ? "contained" : "outlined"}
-                            onPress={() => setSelectedNutri(n)}
-                            style={{ borderRadius: 999, borderColor: theme.violet }}
-                            buttonColor={active ? theme.violet : undefined}
-                            textColor={active ? "#FFFFFF" : theme.violet}
-                          >
-                            {n.name}
-                          </Button>
-                        );
-                      })}
-                    </ScrollView>
-                  </View>
-                )}
 
                 <View style={{ marginTop: 12 }}>
                   <Calendar
@@ -978,64 +994,113 @@ export default function PacienteHome({ email }: { email: string }) {
                   />
                 </View>
 
-                <View style={{ marginTop: 12 }}>
-                  <Text style={{ fontWeight: "900", color: theme.text }}>Hora (HH:MM)</Text>
-                  <TextInput
-                    value={time}
-                    onChangeText={setTime}
-                    mode="outlined"
-                    outlineColor={theme.border}
-                    activeOutlineColor={theme.violet}
-                    textColor={theme.text}
-                    style={{ marginTop: 8, backgroundColor: "#FFF" }}
-                    placeholder="15:30"
-                  />
-                  <Text style={{ color: theme.muted, marginTop: 6, fontSize: 12 }}>
-                    Seleccionado: {formatDateLabel(selectedDay)} a las {normalizeTimeHHmm(time)}
+                <View style={{ marginTop: 12, gap: 10 }}>
+                  <Text style={{ color: theme.text, fontWeight: "900" }}>Nutricionista</Text>
+
+                  {nutris.length === 0 ? (
+                    <View
+                      style={{
+                        padding: 12,
+                        borderRadius: 16,
+                        borderWidth: 1,
+                        borderColor: theme.border2,
+                        backgroundColor: "#FFFFFF",
+                      }}
+                    >
+                      <Text style={{ color: theme.text, fontWeight: "900" }}>
+                        No hay nutricionistas cargados (role="nutricionista").
+                      </Text>
+                      <Text style={{ color: theme.muted, marginTop: 6 }}>
+                        Cargalos en la DB en users/{`{uid}`} con role = "nutricionista".
+                      </Text>
+                    </View>
+                  ) : (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <View style={{ flexDirection: "row", gap: 10 }}>
+                        {nutris.map((n) => {
+                          const selected = n.uid === selectedNutriUid;
+                          return (
+                            <Pressable key={n.uid} onPress={() => setSelectedNutriUid(n.uid)}>
+                              <View
+                                style={{
+                                  padding: 12,
+                                  borderRadius: 16,
+                                  borderWidth: 1,
+                                  borderColor: selected ? theme.violet : theme.border2,
+                                  backgroundColor: selected ? theme.violetSoft : "#FFFFFF",
+                                  minWidth: 220,
+                                  flexDirection: "row",
+                                  alignItems: "center",
+                                  gap: 10,
+                                }}
+                              >
+                                {n.photoURL ? (
+                                  <Avatar.Image size={40} source={{ uri: n.photoURL }} />
+                                ) : (
+                                  <Avatar.Text size={40} label={(n.name || "N")[0].toUpperCase()} />
+                                )}
+                                <View style={{ flex: 1 }}>
+                                  <Text style={{ fontWeight: "900", color: theme.text }}>{n.name}</Text>
+                                  <Text style={{ color: theme.muted, fontSize: 12 }}>{n.email}</Text>
+                                  <Text style={{ color: theme.muted, fontSize: 12, marginTop: 2 }}>
+                                    {dayAvailability.start}–{dayAvailability.end} · 30 min
+                                  </Text>
+                                </View>
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </ScrollView>
+                  )}
+
+                  <Text style={{ color: theme.text, fontWeight: "900", marginTop: 8 }}>
+                    Horarios disponibles — {selectedDay}
                   </Text>
-                </View>
 
-                <Button
-                  mode="contained"
-                  style={[styles.btnPrimary, { marginTop: 12 }]}
-                  buttonColor={styles.btnPrimaryColor}
-                  textColor={styles.btnPrimaryText}
-                  onPress={() => setOpenCreateAppt(true)}
-                  disabled={!selectedNutri}
-                >
-                  Solicitar turno
-                </Button>
+                  <SegmentedButtons
+                    value={timeFilter}
+                    onValueChange={(v) => setTimeFilter(v as any)}
+                    buttons={[
+                      { value: "all", label: "Todo" },
+                      { value: "morning", label: "Mañana" },
+                      { value: "afternoon", label: "Tarde" },
+                    ]}
+                  />
 
-                <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
-                <Text style={{ color: theme.text, fontSize: 14, fontWeight: "900" }}>Mis turnos</Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 8 }}>
+                    {filteredSlots.map((t) => {
+                      const ocupado = bookedSlots.has(t);
+                      const yo = selectedNutri ? myBookedToday.has(`${selectedNutri.uid}|${t}`) : false;
 
-                {myAppointments.length === 0 ? (
-                  <Text style={{ color: theme.muted, marginTop: 8 }}>Todavía no pediste turnos.</Text>
-                ) : (
-                  <View style={{ gap: 10, marginTop: 10 }}>
-                    {myAppointments.map((a) => (
-                      <Card key={a.id} style={styles.innerCard}>
-                        <Card.Content>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
-                            <View style={{ flex: 1, paddingRight: 8 }}>
-                              <Text style={{ fontWeight: "900", color: theme.text }}>
-                                {a.nutriName} · {formatDateLabel(a.date)} {a.time}
-                              </Text>
-                              {statusPill(a.status)}
-                            </View>
+                      const disabled = ocupado || yo || creating || !selectedNutri;
 
-                            <IconButton
-                              icon="close-circle-outline"
-                              iconColor={theme.danger}
-                              onPress={() => cancelMyAppointment(a)}
-                              disabled={a.status === "cancelado" || a.status === "asistio" || a.status === "no_asistio"}
-                            />
-                          </View>
-                        </Card.Content>
-                      </Card>
-                    ))}
+                      return (
+                        <View key={t} style={{ minWidth: 120 }}>
+                          <Button
+                            mode={disabled ? "outlined" : "contained"}
+                            style={{
+                              borderRadius: 14,
+                              backgroundColor: disabled ? "#FFFFFF" : theme.violet,
+                              borderColor: disabled ? theme.border2 : theme.violet,
+                            }}
+                            textColor={disabled ? theme.text : "#FFFFFF"}
+                            onPress={() => bookSlot(t)}
+                            disabled={disabled}
+                          >
+                            {t}
+                          </Button>
+
+                          {(ocupado || yo) && (
+                            <Text style={{ marginTop: 4, fontSize: 11, color: theme.muted }}>
+                              {yo ? "Ya lo pediste" : "Ocupado (ya reservado)"}
+                            </Text>
+                          )}
+                        </View>
+                      );
+                    })}
                   </View>
-                )}
+                </View>
               </Card.Content>
             </Card>
           </View>
@@ -1064,29 +1129,29 @@ export default function PacienteHome({ email }: { email: string }) {
               value={newWeight}
               onChangeText={setNewWeight}
               keyboardType="numeric"
+              mode="outlined"
               style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
               outlineColor={theme.border}
               activeOutlineColor={theme.violet}
               textColor={theme.text}
-              mode="outlined"
             />
 
             <TextInput
               label="Fecha (YYYY-MM-DD)"
               value={newWeightDate}
               onChangeText={setNewWeightDate}
+              mode="outlined"
               style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
               outlineColor={theme.border}
               activeOutlineColor={theme.violet}
               textColor={theme.text}
-              mode="outlined"
             />
 
             <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
               <Button onPress={() => setOpenWeightModal(false)} textColor={theme.text}>
                 Cancelar
               </Button>
-              <Button mode="contained" onPress={addWeight} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
+              <Button mode="contained" onPress={addWeight} style={{ borderRadius: 12, backgroundColor: theme.violet }} textColor="#FFFFFF">
                 Guardar
               </Button>
             </View>
@@ -1106,81 +1171,86 @@ export default function PacienteHome({ email }: { email: string }) {
               borderWidth: 1,
               borderColor: theme.border2,
               ...theme.shadow,
+              maxHeight: "85%",
             }}
           >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
-            <Text style={{ color: theme.muted, marginTop: 6 }}>Fecha, tipo de comida y experiencia.</Text>
+            <ScrollView>
+              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
+              <Text style={{ color: theme.muted, marginTop: 6 }}>Fecha, tipo y encuesta con estrellas.</Text>
 
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={mealDate}
-              onChangeText={setMealDate}
-              style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="Fecha (YYYY-MM-DD)"
+                value={mealDate}
+                onChangeText={setMealDate}
+                mode="outlined"
+                style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            <TextInput
-              label="Tipo (Desayuno/Almuerzo/Merienda/Cena)"
-              value={mealType}
-              onChangeText={setMealType}
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="Tipo (Desayuno/Almuerzo/Merienda/Cena)"
+                value={mealType}
+                onChangeText={setMealType}
+                mode="outlined"
+                style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            <TextInput
-              label="¿Qué comiste?"
-              value={mealText}
-              onChangeText={setMealText}
-              multiline
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="¿Qué comiste?"
+                value={mealText}
+                onChangeText={setMealText}
+                multiline
+                mode="outlined"
+                style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            {/* ✅ 6 preguntas con estrellas */}
-            <View style={{ marginTop: 12 }}>
-              <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>⭐ Experiencia general</Text>
+                <StarRating value={mealRatings.overall} onChange={(v) => setMealRatings((p) => ({ ...p, overall: v }))} />
+              </View>
 
-              <Text style={{ color: theme.muted }}>General</Text>
-              <StarRating value={ratingGeneral} onChange={setRatingGeneral} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>1) ¿Qué tanto te llenó?</Text>
+                <StarRating value={mealRatings.satiety} onChange={(v) => setMealRatings((p) => ({ ...p, satiety: v }))} />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Saciada/o</Text>
-              <StarRating value={q1} onChange={setQ1} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>2) Energía después</Text>
+                <StarRating value={mealRatings.energy} onChange={(v) => setMealRatings((p) => ({ ...p, energy: v }))} />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Energía</Text>
-              <StarRating value={q2} onChange={setQ2} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>3) Digestión</Text>
+                <StarRating value={mealRatings.digestion} onChange={(v) => setMealRatings((p) => ({ ...p, digestion: v }))} />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Digestión</Text>
-              <StarRating value={q3} onChange={setQ3} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>4) Antojos/ansiedad</Text>
+                <StarRating value={mealRatings.cravings} onChange={(v) => setMealRatings((p) => ({ ...p, cravings: v }))} />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
-              <StarRating value={q4} onChange={setQ4} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>5) Adherencia al plan</Text>
+                <StarRating value={mealRatings.adherence} onChange={(v) => setMealRatings((p) => ({ ...p, adherence: v }))} />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
-              <StarRating value={q5} onChange={setQ5} />
-            </View>
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
-                Cancelar
-              </Button>
-              <Button mode="contained" onPress={addMeal} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
-                Guardar
-              </Button>
-            </View>
+              <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
+                  Cancelar
+                </Button>
+                <Button mode="contained" onPress={addMeal} style={{ borderRadius: 12, backgroundColor: theme.violet }} textColor="#FFFFFF">
+                  Guardar
+                </Button>
+              </View>
+            </ScrollView>
           </Modal>
         </Portal>
 
@@ -1197,126 +1267,112 @@ export default function PacienteHome({ email }: { email: string }) {
               borderWidth: 1,
               borderColor: theme.border2,
               ...theme.shadow,
+              maxHeight: "85%",
             }}
           >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Editar comida</Text>
+            <ScrollView>
+              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Editar comida</Text>
 
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={editingMeal?.date || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, date: t } : p))}
-              style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="Fecha (YYYY-MM-DD)"
+                value={editingMeal?.date || ""}
+                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, date: t } : p))}
+                mode="outlined"
+                style={{ marginTop: 12, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            <TextInput
-              label="Tipo"
-              value={editingMeal?.mealType || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, mealType: t } : p))}
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="Tipo"
+                value={editingMeal?.mealType || ""}
+                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, mealType: t } : p))}
+                mode="outlined"
+                style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            <TextInput
-              label="Texto"
-              value={editingMeal?.text || ""}
-              onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, text: t } : p))}
-              multiline
-              style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-              mode="outlined"
-            />
+              <TextInput
+                label="Texto"
+                value={editingMeal?.text || ""}
+                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, text: t } : p))}
+                multiline
+                mode="outlined"
+                style={{ marginTop: 10, backgroundColor: "#FFFFFF" }}
+                outlineColor={theme.border}
+                activeOutlineColor={theme.violet}
+                textColor={theme.text}
+              />
 
-            {/* ✅ editar las 6 estrellas */}
-            <View style={{ marginTop: 12 }}>
-              <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>⭐ Experiencia general</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.overall || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, overall: v } } : p))}
+                />
+              </View>
 
-              <Text style={{ color: theme.muted }}>General</Text>
-              <StarRating value={editingMeal?.ratingGeneral || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratingGeneral: v } : p))} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>1) ¿Qué tanto te llenó?</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.satiety || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, satiety: v } } : p))}
+                />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Saciada/o</Text>
-              <StarRating value={editingMeal?.q1 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q1: v } : p))} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>2) Energía después</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.energy || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, energy: v } } : p))}
+                />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Energía</Text>
-              <StarRating value={editingMeal?.q2 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q2: v } : p))} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>3) Digestión</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.digestion || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, digestion: v } } : p))}
+                />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Digestión</Text>
-              <StarRating value={editingMeal?.q3 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q3: v } : p))} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>4) Antojos/ansiedad</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.cravings || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, cravings: v } } : p))}
+                />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Ansiedad / Antojos</Text>
-              <StarRating value={editingMeal?.q4 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q4: v } : p))} />
+              <View style={{ marginTop: 12 }}>
+                <Text style={{ color: theme.text, fontWeight: "900" }}>5) Adherencia al plan</Text>
+                <StarRating
+                  value={editingMeal?.ratings?.adherence || 0}
+                  onChange={(v) => setEditingMeal((p) => (p ? { ...p, ratings: { ...p.ratings, adherence: v } } : p))}
+                />
+              </View>
 
-              <View style={{ height: 8 }} />
-              <Text style={{ color: theme.muted }}>Cumplimiento del plan</Text>
-              <StarRating value={editingMeal?.q5 || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, q5: v } : p))} />
-            </View>
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
-                Cancelar
-              </Button>
-              <Button mode="contained" onPress={saveMealEdit} style={{ borderRadius: 12 }} buttonColor={theme.violet} textColor="#FFFFFF">
-                Guardar cambios
-              </Button>
-            </View>
+              <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
+                  Cancelar
+                </Button>
+                <Button
+                  mode="contained"
+                  onPress={saveMealEdit}
+                  style={{ borderRadius: 12, backgroundColor: theme.violet }}
+                  textColor="#FFFFFF"
+                >
+                  Guardar cambios
+                </Button>
+              </View>
+            </ScrollView>
           </Modal>
         </Portal>
 
-        {/* MODAL CONFIRMAR TURNO */}
-        <Portal>
-          <Modal
-            visible={openCreateAppt}
-            onDismiss={() => setOpenCreateAppt(false)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 18,
-              padding: 18,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-            }}
-          >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Confirmar turno</Text>
-            <Text style={{ color: theme.muted, marginTop: 8, lineHeight: 20 }}>
-              Nutricionista: <Text style={{ fontWeight: "900", color: theme.text }}>{selectedNutri?.name || "-"}</Text>
-              {"\n"}Fecha: <Text style={{ fontWeight: "900", color: theme.text }}>{formatDateLabel(selectedDay)}</Text>
-              {"\n"}Hora: <Text style={{ fontWeight: "900", color: theme.text }}>{normalizeTimeHHmm(time)}</Text>
-            </Text>
-
-            <Divider style={{ marginVertical: 14, ...styles.subtleDivider }} />
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end" }}>
-              <Button onPress={() => setOpenCreateAppt(false)} textColor={theme.text}>
-                Volver
-              </Button>
-              <Button
-                mode="contained"
-                onPress={createAppointment}
-                loading={busyCreate}
-                style={{ borderRadius: 12 }}
-                buttonColor={theme.violet}
-                textColor="#FFFFFF"
-              >
-                Confirmar
-              </Button>
-            </View>
-          </Modal>
-        </Portal>
-
-        <Snackbar visible={snack.open} onDismiss={closeToast} duration={2500}>
+        <Snackbar visible={snack.open} onDismiss={() => setSnack({ open: false, msg: "" })} duration={2500}>
           {snack.msg}
         </Snackbar>
       </View>
