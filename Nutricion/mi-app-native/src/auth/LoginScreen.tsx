@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { View, Image, KeyboardAvoidingView, Platform, Pressable } from "react-native";
 import { Button, Card, Text, TextInput, Divider, HelperText } from "react-native-paper";
 import { signInWithEmailAndPassword } from "firebase/auth";
@@ -13,14 +13,13 @@ function isValidEmail(v: string) {
 function friendlyAuthError(message: string) {
   const msg = (message || "").toLowerCase();
 
-  // Firebase common
   if (msg.includes("auth/unauthorized-domain") || msg.includes("unauthorized-domain")) {
     return "Dominio no autorizado en Firebase. Agregá tu dominio de Netlify en Authentication → Settings → Authorized domains.";
   }
   if (msg.includes("redirect_uri_mismatch")) {
-    return "Redirect URI mismatch. En Google Cloud agregá tu URL /oauthredirect como Redirect URI autorizado.";
+    return "Redirect URI mismatch. Revisá tus URIs autorizadas en Google Cloud.";
   }
-  if (msg.includes("popup_closed_by_user") || msg.includes("cancelled")) {
+  if (msg.includes("popup_closed_by_user") || msg.includes("cancelled") || msg.includes("closed")) {
     return "Cancelaste el inicio con Google.";
   }
   if (msg.includes("invalid-credential") || msg.includes("wrong-password")) return "Email o contraseña incorrectos.";
@@ -44,29 +43,7 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
   const emailOk = useMemo(() => (email.length === 0 ? true : isValidEmail(email)), [email]);
   const passOk = useMemo(() => (password.length === 0 ? true : password.length >= 6), [password]);
 
-  const { promptAsync, signInFromResponse, response, isConfigured } = useGoogleSignIn();
-
-  // ✅ Cuando Google vuelve, este effect corre y firma en Firebase
-  useEffect(() => {
-    (async () => {
-      try {
-        // LOGS para ver el error REAL
-        console.log("GOOGLE RESPONSE =>", response);
-
-        const cred = await signInFromResponse();
-        if (cred) {
-          console.log("✅ Firebase signInWithCredential OK =>", cred.user?.uid, cred.user?.email);
-          // No navegamos acá: tu app/(tabs)/_layout.tsx ya detecta sesión y muestra el panel
-        }
-      } catch (e: any) {
-        console.log("❌ GOOGLE LOGIN ERROR OBJECT =>", e);
-        console.log("❌ GOOGLE LOGIN ERROR MESSAGE =>", e?.message);
-        console.log("❌ GOOGLE LOGIN ERROR CODE =>", e?.code);
-        setError(friendlyAuthError(String(e?.message || e)));
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [response]);
+  const { signInWithGoogle, isConfigured } = useGoogleSignIn();
 
   async function onLoginEmail() {
     setError("");
@@ -95,19 +72,23 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
   async function onLoginGoogle() {
     setError("");
 
-    if (!isConfigured) {
+    // En web, aunque falte webClientId, Firebase popup puede funcionar igual
+    // pero lo dejamos como warning/guía
+    if (!isConfigured && Platform.OS !== "web") {
       setError("Falta EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env. Reiniciá con: npx expo start -c");
       return;
     }
 
     setBusyGoogle(true);
     try {
-      console.log("🔵 Starting Google prompt...");
-      await promptAsync();
+      console.log("🔵 Google Login START...");
+      const cred = await signInWithGoogle();
+      console.log("✅ Google Login OK =>", cred?.user?.uid, cred?.user?.email);
+      // Tu app/(tabs)/_layout.tsx ya detecta sesión y redirige
     } catch (e: any) {
-      console.log("❌ PROMPT ASYNC ERROR OBJECT =>", e);
-      console.log("❌ PROMPT ASYNC ERROR MESSAGE =>", e?.message);
-      console.log("❌ PROMPT ASYNC ERROR CODE =>", e?.code);
+      console.log("❌ GOOGLE LOGIN ERROR OBJECT =>", e);
+      console.log("❌ GOOGLE LOGIN ERROR MESSAGE =>", e?.message);
+      console.log("❌ GOOGLE LOGIN ERROR CODE =>", e?.code);
       setError(friendlyAuthError(String(e?.message || e)));
     } finally {
       setBusyGoogle(false);
@@ -119,8 +100,17 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       style={{ flex: 1, backgroundColor: "#F6F7FB" }}
     >
-      <View style={{ flex: 1, justifyContent: "center", padding: 18, maxWidth: 520, alignSelf: "center", width: "100%" }}>
-        {/* HEADER / LOGO (clickeable => /public) */}
+      <View
+        style={{
+          flex: 1,
+          justifyContent: "center",
+          padding: 18,
+          maxWidth: 520,
+          alignSelf: "center",
+          width: "100%",
+        }}
+      >
+        {/* LOGO clickeable => /public */}
         <View style={{ alignItems: "center", marginBottom: 18 }}>
           <Pressable onPress={() => router.push("/(public)")}>
             <Image
@@ -139,7 +129,6 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
         <Card style={{ borderRadius: 22 }}>
           <Card.Content>
-            {/* GOOGLE */}
             <Button
               mode="contained"
               onPress={onLoginGoogle}
@@ -152,7 +141,6 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
 
             <Divider style={{ marginVertical: 14 }} />
 
-            {/* EMAIL/PASS */}
             <TextInput
               label="Email"
               value={email}
