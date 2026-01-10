@@ -1,4 +1,4 @@
-import { ref, push, runTransaction, update, remove, get } from "firebase/database";
+import { ref, push, runTransaction, update, remove, onValue } from "firebase/database";
 import { rtdb } from "./firebase";
 
 export type AppointmentStatus = "pendiente" | "cancelado" | "asistio" | "no_asistio";
@@ -15,7 +15,7 @@ export type Appointment = {
   nutriEmail: string;
 
   date: string; // YYYY-MM-DD
-  time: string; // HH:mm
+  time: string; // HH:mm (cada 30min)
   startAt: number; // timestamp ms
   endAt: number; // timestamp ms
 
@@ -32,17 +32,15 @@ function toTimestamp(dateYYYYMMDD: string, timeHHmm: string) {
   return dt.getTime();
 }
 
-/** Devuelve Set de horarios ocupados ("HH:mm") para un nutri en una fecha */
-export async function getBookedSlotsForNutri(nutriUid: string, date: string) {
-  const snap = await get(ref(rtdb, `slots/${nutriUid}/${date}`));
-  const val = snap.val() || {};
-  return new Set<string>(Object.keys(val));
+function apptKey(appt: Appointment) {
+  // ordenable por fecha/hora
+  return `${appt.date}T${appt.time}`;
 }
 
 /**
  * Reserva turno ATÓMICO:
- * 1) bloquea slots/nutri/date/time con transaction (si existe -> ocupado)
- * 2) crea appointment y duplica índices
+ * - bloquea slots/{nutriUid}/{date}/{time} con transaction
+ * - si está libre, crea appointment y duplica índices
  */
 export async function bookAppointment(input: {
   patientUid: string;
@@ -67,7 +65,7 @@ export async function bookAppointment(input: {
 
   // 1) Transaction: si ya existe, está ocupado
   const tx = await runTransaction(slotRef, (current) => {
-    if (current) return; // ya ocupado
+    if (current) return; // ocupado
     return apptId; // reservar
   });
 
@@ -77,7 +75,6 @@ export async function bookAppointment(input: {
     throw err;
   }
 
-  // 2) Crear appointment
   const appt: Appointment = {
     id: apptId,
 
@@ -109,12 +106,34 @@ export async function bookAppointment(input: {
   return appt;
 }
 
-export async function cancelAppointment(appt: Appointment) {
+/** Nutri: marca estado (asistió / no asistió / pendiente) */
+export async function setAppointmentStatus(appt: Appointment, status: AppointmentStatus) {
   const updates: Record<string, any> = {};
-  updates[`appointments/${appt.id}/status`] = "cancelado";
-  updates[`appointmentsByNutri/${appt.nutriUid}/${appt.id}/status`] = "cancelado";
-  updates[`appointmentsByPatient/${appt.patientUid}/${appt.id}/status`] = "cancelado";
-
+  updates[`appointments/${appt.id}/status`] = status;
+  updates[`appointmentsByNutri/${appt.nutriUid}/${appt.id}/status`] = status;
+  updates[`appointmentsByPatient/${appt.patientUid}/${appt.id}/status`] = status;
   await update(ref(rtdb), updates);
+}
+
+/** Cancela + libera slot */
+export async function cancelAppointment(appt: Appointment) {
+  await setAppointmentStatus(appt, "cancelado");
   await remove(ref(rtdb, `slots/${appt.nutriUid}/${appt.date}/${appt.time}`));
+}
+
+/** Listener simple para turnos del nutri */
+export function listenAppointmentsByNutri(
+  nutriUid: string,
+  cb: (list: Appointment[]) => void
+) {
+  const apptRef = ref(rtdb, `appointmentsByNutri/${nutriUid}`);
+  return onValue(apptRef, (snap) => {
+    const val = snap.val() || {};
+    const list: Appointment[] = Object.keys(val).map((id) => ({
+      id,
+      ...val[id],
+    }));
+    list.sort((a, b) => (apptKey(a) < apptKey(b) ? -1 : 1));
+    cb(list);
+  });
 }
