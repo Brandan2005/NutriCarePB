@@ -12,11 +12,23 @@ function isValidEmail(v: string) {
 
 function friendlyAuthError(message: string) {
   const msg = (message || "").toLowerCase();
+
+  // Firebase common
+  if (msg.includes("auth/unauthorized-domain") || msg.includes("unauthorized-domain")) {
+    return "Dominio no autorizado en Firebase. Agregá tu dominio de Netlify en Authentication → Settings → Authorized domains.";
+  }
+  if (msg.includes("redirect_uri_mismatch")) {
+    return "Redirect URI mismatch. En Google Cloud agregá tu URL /oauthredirect como Redirect URI autorizado.";
+  }
+  if (msg.includes("popup_closed_by_user") || msg.includes("cancelled")) {
+    return "Cancelaste el inicio con Google.";
+  }
   if (msg.includes("invalid-credential") || msg.includes("wrong-password")) return "Email o contraseña incorrectos.";
   if (msg.includes("user-not-found")) return "No existe una cuenta con ese email.";
   if (msg.includes("too-many-requests")) return "Demasiados intentos. Probá de nuevo en unos minutos.";
   if (msg.includes("network")) return "Problema de conexión. Revisá internet e intentá nuevamente.";
-  return "No se pudo iniciar sesión. Intentá nuevamente.";
+
+  return "No se pudo iniciar sesión. Revisá la consola para ver el error real.";
 }
 
 export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void }) {
@@ -32,25 +44,25 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
   const emailOk = useMemo(() => (email.length === 0 ? true : isValidEmail(email)), [email]);
   const passOk = useMemo(() => (password.length === 0 ? true : password.length >= 6), [password]);
 
-  const { promptAsync, signInFromResponse, response, redirectUri, isConfigured } = useGoogleSignIn();
+  const { promptAsync, signInFromResponse, response, isConfigured } = useGoogleSignIn();
 
-  // Si vuelve la respuesta de Google, intentamos loguear con Firebase
+  // ✅ Cuando Google vuelve, este effect corre y firma en Firebase
   useEffect(() => {
     (async () => {
       try {
-        const res = await signInFromResponse();
-        if (!res) return;
+        // LOGS para ver el error REAL
+        console.log("GOOGLE RESPONSE =>", response);
 
-        // ✅ Si se creó usuario nuevo con Google, lo mando a “registrarse”
-        // (vos pediste: “si no existe -> registrarse”)
-        if (res.isNewUser) {
-          onGoRegister();
-          return;
+        const cred = await signInFromResponse();
+        if (cred) {
+          console.log("✅ Firebase signInWithCredential OK =>", cred.user?.uid, cred.user?.email);
+          // No navegamos acá: tu app/(tabs)/_layout.tsx ya detecta sesión y muestra el panel
         }
-
-        // Si ya existía, entra directo y listo (session queda activa)
       } catch (e: any) {
-        setError(friendlyAuthError(e?.message || ""));
+        console.log("❌ GOOGLE LOGIN ERROR OBJECT =>", e);
+        console.log("❌ GOOGLE LOGIN ERROR MESSAGE =>", e?.message);
+        console.log("❌ GOOGLE LOGIN ERROR CODE =>", e?.code);
+        setError(friendlyAuthError(String(e?.message || e)));
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -73,7 +85,8 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
     try {
       await signInWithEmailAndPassword(auth, cleanEmail, password);
     } catch (e: any) {
-      setError(friendlyAuthError(e?.message || ""));
+      console.log("❌ EMAIL LOGIN ERROR =>", e);
+      setError(friendlyAuthError(String(e?.message || e)));
     } finally {
       setBusy(false);
     }
@@ -83,15 +96,19 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
     setError("");
 
     if (!isConfigured) {
-      setError("Falta configurar EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env y reiniciar con: npx expo start -c");
+      setError("Falta EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env. Reiniciá con: npx expo start -c");
       return;
     }
 
     setBusyGoogle(true);
     try {
+      console.log("🔵 Starting Google prompt...");
       await promptAsync();
     } catch (e: any) {
-      setError(friendlyAuthError(e?.message || ""));
+      console.log("❌ PROMPT ASYNC ERROR OBJECT =>", e);
+      console.log("❌ PROMPT ASYNC ERROR MESSAGE =>", e?.message);
+      console.log("❌ PROMPT ASYNC ERROR CODE =>", e?.code);
+      setError(friendlyAuthError(String(e?.message || e)));
     } finally {
       setBusyGoogle(false);
     }
@@ -103,49 +120,39 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
       style={{ flex: 1, backgroundColor: "#F6F7FB" }}
     >
       <View style={{ flex: 1, justifyContent: "center", padding: 18, maxWidth: 520, alignSelf: "center", width: "100%" }}>
-        {/* HEADER */}
-        <View style={{ alignItems: "center", marginBottom: 16 }}>
-          <Pressable
-            onPress={() => router.replace("/(public)")}
-            style={{ alignItems: "center" }}
-          >
+        {/* HEADER / LOGO (clickeable => /public) */}
+        <View style={{ alignItems: "center", marginBottom: 18 }}>
+          <Pressable onPress={() => router.push("/(public)")}>
             <Image
               source={require("../../assets/images/icon.png")}
-              style={{ width: 64, height: 64, borderRadius: 18 }}
+              style={{ width: 62, height: 62, borderRadius: 18 }}
             />
           </Pressable>
 
-          <Text variant="headlineMedium" style={{ marginTop: 10 }}>
+          <Text variant="headlineMedium" style={{ marginTop: 10, fontWeight: "800" }}>
             NutriCare
           </Text>
           <Text style={{ opacity: 0.7, marginTop: 4, textAlign: "center" }}>
             Iniciá sesión para ver tu progreso, comidas y turnos.
           </Text>
-
-          {/* Debug útil */}
-          {Platform.OS === "web" && (
-            <Text style={{ opacity: 0.45, marginTop: 6, fontSize: 12 }}>
-              Redirect: {redirectUri}
-            </Text>
-          )}
         </View>
 
-        {/* CARD */}
         <Card style={{ borderRadius: 22 }}>
           <Card.Content>
+            {/* GOOGLE */}
             <Button
               mode="contained"
               onPress={onLoginGoogle}
               loading={busyGoogle}
               disabled={busyGoogle || busy}
               style={{ borderRadius: 14 }}
-              contentStyle={{ paddingVertical: 6 }}
             >
               Entrar con Google
             </Button>
 
             <Divider style={{ marginVertical: 14 }} />
 
+            {/* EMAIL/PASS */}
             <TextInput
               label="Email"
               value={email}
@@ -154,6 +161,7 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
               keyboardType="email-address"
               error={!emailOk}
               style={{ marginBottom: 8 }}
+              mode="outlined"
             />
             {!emailOk && <HelperText type="error">Email inválido</HelperText>}
 
@@ -170,6 +178,7 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
                 />
               }
               style={{ marginBottom: 6 }}
+              mode="outlined"
             />
             {!passOk && <HelperText type="error">Mínimo 6 caracteres</HelperText>}
 
@@ -185,7 +194,6 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
               loading={busy}
               disabled={busy || busyGoogle}
               style={{ borderRadius: 14, marginTop: 12 }}
-              contentStyle={{ paddingVertical: 6 }}
             >
               Iniciar sesión
             </Button>
@@ -193,11 +201,15 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
             <Button onPress={onGoRegister} style={{ marginTop: 6 }}>
               Crear cuenta
             </Button>
+
+            <Button onPress={() => router.push("/(public)")} style={{ marginTop: 2 }}>
+              Volver al Home
+            </Button>
           </Card.Content>
         </Card>
 
         <Text style={{ textAlign: "center", opacity: 0.55, marginTop: 14, fontSize: 12 }}>
-          Al continuar, aceptás nuestros términos y política de privacidad.
+          Al continuar aceptás nuestros términos y política de privacidad.
         </Text>
       </View>
     </KeyboardAvoidingView>
