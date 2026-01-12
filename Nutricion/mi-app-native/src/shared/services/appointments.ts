@@ -1,7 +1,7 @@
-import { ref, push, update, remove, get, runTransaction, onValue, off } from "firebase/database";
+import { ref, push, set, runTransaction, update, remove, onValue, off, get } from "firebase/database";
 import { rtdb } from "./firebase";
 
-export type AppointmentStatus = "requested" | "cancelled" | "attended" | "no_show";
+export type AppointmentStatus = "pendiente" | "cancelado" | "asistio" | "no_asistio";
 
 export type Appointment = {
   id: string;
@@ -10,41 +10,46 @@ export type Appointment = {
   patientName: string;
   patientEmail: string;
 
-  nutritionistUid: string;
-  nutritionistName: string;
+  nutriUid: string;
+  nutriName: string;
+  nutriEmail: string;
 
   date: string; // YYYY-MM-DD
-  time: string; // HH:mm
+  time: string; // HH:mm (cada 30min)
 
-  startAt: number; // ms
-  endAt: number;   // ms
+  startAt: number; // timestamp ms
+  endAt: number;   // timestamp ms
 
-  createdAt: number; // ms
   status: AppointmentStatus;
+  createdAt: number;
+
+  reminderSent?: boolean;
 };
 
-export function toTimestamp(dateYYYYMMDD: string, timeHHmm: string) {
+function toTimestamp(dateYYYYMMDD: string, timeHHmm: string) {
   const [y, m, d] = dateYYYYMMDD.split("-").map(Number);
   const [hh, mm] = timeHHmm.split(":").map(Number);
-  return new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
-}
-
-export function buildSlotKey(date: string, time: string) {
-  // global slot id
-  return `${date}_${time}`;
+  const dt = new Date(y, m - 1, d, hh, mm, 0, 0);
+  return dt.getTime();
 }
 
 /**
- * Reserva ATÓMICA GLOBAL:
- * 1) lock global: slots/{date_time} = { apptId, nutritionistUid, patientUid }
- *    -> si existe, está ocupado (por cualquier nutri)
- * 2) crea appointment y duplica índices:
- *    appointments/
- *    appointmentsByPatient/{patientUid}/
- *    appointmentsByNutri/{nutritionistUid}/
+ * Reserva turno ATÓMICO:
+ * - bloquea slots/nutri/date/time con transaction
+ * - si está libre, crea appointment y duplica índices
  */
-export async function bookAppointmentAtomic(input: Omit<Appointment, "id" | "startAt" | "endAt" | "createdAt" | "status"> & {
-  durationMin?: number;
+export async function bookAppointment(input: {
+  patientUid: string;
+  patientName: string;
+  patientEmail: string;
+
+  nutriUid: string;
+  nutriName: string;
+  nutriEmail: string;
+
+  date: string; // YYYY-MM-DD
+  time: string; // HH:mm
+  durationMin?: number; // default 30
 }) {
   const durationMin = input.durationMin ?? 30;
 
@@ -52,45 +57,46 @@ export async function bookAppointmentAtomic(input: Omit<Appointment, "id" | "sta
   const endAt = startAt + durationMin * 60 * 1000;
 
   const apptId = push(ref(rtdb, "appointments")).key!;
-  const slotKey = buildSlotKey(input.date, input.time);
-  const slotRef = ref(rtdb, `slots/${slotKey}`);
+  const slotRef = ref(rtdb, `slots/${input.nutriUid}/${input.date}/${input.time}`);
 
-  // 1) Transaction global lock
+  // 1) Transaction: si ya existe, está ocupado
   const tx = await runTransaction(slotRef, (current) => {
-    if (current) return; // ocupado
-    return {
-      apptId,
-      nutritionistUid: input.nutritionistUid,
-      patientUid: input.patientUid,
-      createdAt: Date.now(),
-    };
+    if (current) return; // ya ocupado
+    return apptId;       // reservar
   });
 
   if (!tx.committed) {
-    const err: any = new Error("Ese horario ya fue reservado. Elegí otro.");
-    err.code = "SLOT_TAKEN";
+    const err = new Error("Ese horario ya fue reservado. Elegí otro.");
+    (err as any).code = "SLOT_TAKEN";
     throw err;
   }
 
+  // 2) Crear appointment
   const appt: Appointment = {
     id: apptId,
+
     patientUid: input.patientUid,
     patientName: input.patientName,
     patientEmail: input.patientEmail,
-    nutritionistUid: input.nutritionistUid,
-    nutritionistName: input.nutritionistName,
+
+    nutriUid: input.nutriUid,
+    nutriName: input.nutriName,
+    nutriEmail: input.nutriEmail,
+
     date: input.date,
     time: input.time,
     startAt,
     endAt,
+
+    status: "pendiente",
     createdAt: Date.now(),
-    status: "requested",
+    reminderSent: false,
   };
 
   const updates: Record<string, any> = {};
   updates[`appointments/${apptId}`] = appt;
+  updates[`appointmentsByNutri/${input.nutriUid}/${apptId}`] = appt;
   updates[`appointmentsByPatient/${input.patientUid}/${apptId}`] = appt;
-  updates[`appointmentsByNutri/${input.nutritionistUid}/${apptId}`] = appt;
 
   await update(ref(rtdb), updates);
 
@@ -98,57 +104,53 @@ export async function bookAppointmentAtomic(input: Omit<Appointment, "id" | "sta
 }
 
 export async function cancelAppointment(appt: Appointment) {
-  const slotKey = buildSlotKey(appt.date, appt.time);
-
   const updates: Record<string, any> = {};
-  updates[`appointments/${appt.id}/status`] = "cancelled";
-  updates[`appointmentsByPatient/${appt.patientUid}/${appt.id}/status`] = "cancelled";
-  updates[`appointmentsByNutri/${appt.nutritionistUid}/${appt.id}/status`] = "cancelled";
+  updates[`appointments/${appt.id}/status`] = "cancelado";
+  updates[`appointmentsByNutri/${appt.nutriUid}/${appt.id}/status`] = "cancelado";
+  updates[`appointmentsByPatient/${appt.patientUid}/${appt.id}/status`] = "cancelado";
 
   await update(ref(rtdb), updates);
-  await remove(ref(rtdb, `slots/${slotKey}`));
-}
-
-export async function getBookedSlotsForDay(date: string) {
-  // retorna Set("HH:mm") ocupados globalmente para esa fecha
-  const snap = await get(ref(rtdb, "slots"));
-  const val = snap.val() || {};
-  const set = new Set<string>();
-  for (const key of Object.keys(val)) {
-    if (key.startsWith(`${date}_`)) {
-      const time = key.split("_")[1];
-      if (time) set.add(time);
-    }
-  }
-  return set;
+  await remove(ref(rtdb, `slots/${appt.nutriUid}/${appt.date}/${appt.time}`));
 }
 
 export function listenAppointmentsByPatient(
   patientUid: string,
-  cb: (appts: Appointment[]) => void
+  cb: (items: Appointment[]) => void
 ) {
-  const pRef = ref(rtdb, `appointmentsByPatient/${patientUid}`);
+  const r = ref(rtdb, `appointmentsByPatient/${patientUid}`);
   const handler = (snap: any) => {
     const val = snap.val() || {};
-    const list: Appointment[] = Object.keys(val).map((id) => val[id]);
-    list.sort((a, b) => (a.startAt || 0) - (b.startAt || 0));
+    const list: Appointment[] = Object.keys(val).map((id) => ({ id, ...val[id] }));
+    list.sort((a, b) => (a.startAt ?? 0) - (b.startAt ?? 0));
     cb(list);
   };
-  onValue(pRef, handler);
-  return () => off(pRef, "value", handler);
+
+  onValue(r, handler);
+  return () => off(r, "value", handler);
 }
 
-export function listenAppointmentsByNutri(
+/**
+ * Devuelve Set<"HH:mm"> ocupados para un nutri y fecha
+ */
+export async function getBookedSlotsForNutri(nutriUid: string, date: string) {
+  const s = await get(ref(rtdb, `slots/${nutriUid}/${date}`));
+  const val = s.val() || {};
+  return new Set<string>(Object.keys(val));
+}
+
+/**
+ * Listener realtime para slots ocupados (mejor UX)
+ */
+export function listenBookedSlotsForNutri(
   nutriUid: string,
-  cb: (appts: Appointment[]) => void
+  date: string,
+  cb: (set: Set<string>) => void
 ) {
-  const nRef = ref(rtdb, `appointmentsByNutri/${nutriUid}`);
+  const r = ref(rtdb, `slots/${nutriUid}/${date}`);
   const handler = (snap: any) => {
     const val = snap.val() || {};
-    const list: Appointment[] = Object.keys(val).map((id) => val[id]);
-    list.sort((a, b) => (a.startAt || 0) - (b.startAt || 0));
-    cb(list);
+    cb(new Set<string>(Object.keys(val)));
   };
-  onValue(nRef, handler);
-  return () => off(nRef, "value", handler);
+  onValue(r, handler);
+  return () => off(r, "value", handler);
 }
