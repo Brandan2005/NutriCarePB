@@ -1,9 +1,10 @@
+// src/roles/paciente/screens/PacienteHome.tsx
+
 import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   ScrollView,
   Image,
-  Dimensions,
   useWindowDimensions,
   Platform,
 } from "react-native";
@@ -35,11 +36,7 @@ import {
   listenAppointmentsByPatient,
   listenBookedSlotsForNutri,
 } from "../../../shared/services/appointments";
-import {
-  listenNutritionists,
-  Nutritionist,
-  getSlotsForNutriOnDay,
-} from "../../../shared/services/nutritionists";
+import { listenNutritionists, Nutritionist } from "../../../shared/services/nutritionists";
 import { sendAppointmentEmail } from "../../../shared/services/email";
 
 type WeightItem = { id: string; value: number; date: string };
@@ -76,10 +73,9 @@ function todayISO() {
 }
 
 function getDowKey(dateISO: string) {
-  // JS: 0 domingo ... 6 sábado
   const d = new Date(dateISO + "T00:00:00");
   const n = d.getDay();
-  const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
   return keys[n];
 }
 
@@ -111,6 +107,114 @@ function StarRow({
       </View>
     </View>
   );
+}
+
+/** ---------- TURNOS: helpers robustos (arregla availability + breaks) ---------- */
+function toMinutes(hhmm: string) {
+  const [h, m] = String(hhmm).split(":").map((x) => Number(x));
+  if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
+  return h * 60 + m;
+}
+function toHHMM(min: number) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+function isHHMM(x: any) {
+  return typeof x === "string" && /^\d{2}:\d{2}$/.test(x.trim());
+}
+function isRangeStr(x: any) {
+  return typeof x === "string" && /^\d{2}:\d{2}\s*-\s*\d{2}:\d{2}$/.test(x.trim());
+}
+
+type BreakRange = { start: string; end: string };
+
+function normalizeBreaks(input: any): BreakRange[] {
+  // Soporta:
+  // - breaks: [{start,end}]
+  // - breaks: {a:{start,end}, b:{start,end}}
+  // - breaks: ["10:00-10:30", ...]
+  // - breaks: [{from,to}] etc
+  const raw = Array.isArray(input)
+    ? input
+    : input && typeof input === "object"
+    ? Object.values(input)
+    : [];
+
+  const out: BreakRange[] = [];
+  for (const b of raw) {
+    if (!b) continue;
+
+    if (isRangeStr(b)) {
+      const [s, e] = b.replace(/\s/g, "").split("-");
+      out.push({ start: s, end: e });
+      continue;
+    }
+
+    const start = (b.start ?? b.from ?? b.ini ?? b.begin) as any;
+    const end = (b.end ?? b.to ?? b.fin ?? b.until) as any;
+
+    if (isHHMM(start) && isHHMM(end)) out.push({ start, end });
+  }
+  return out;
+}
+
+function timeInsideBreak(t: string, br: BreakRange) {
+  const tm = toMinutes(t);
+  const s = toMinutes(br.start);
+  const e = toMinutes(br.end);
+  if ([tm, s, e].some((x) => Number.isNaN(x))) return false;
+  return tm >= s && tm < e;
+}
+
+function uniqueSortedSlots(slots: string[]) {
+  const clean = slots
+    .filter((t) => isHHMM(t))
+    .map((t) => t.trim());
+  const set = Array.from(new Set(clean));
+  set.sort((a, b) => toMinutes(a) - toMinutes(b));
+  return set;
+}
+
+/**
+ * Lee la disponibilidad del nutri sin depender de un único formato.
+ * Acepta:
+ * - availability[dow] = ["09:00","09:30",...]
+ * - availability[dow] = { slots: [...] }
+ * - availability[dow] = { start:"09:00", end:"13:00", intervalMin:30, breaks:[...] }
+ */
+function getSlotsForNutriOnDaySafe(nutri: any, dow: string): string[] {
+  const av = nutri?.availability?.[dow];
+
+  // 1) Si ya viene como array de slots
+  if (Array.isArray(av)) {
+    return uniqueSortedSlots(av);
+  }
+
+  // 2) Si viene como objeto con slots
+  if (av && typeof av === "object" && Array.isArray(av.slots)) {
+    return uniqueSortedSlots(av.slots);
+  }
+
+  // 3) Si viene como rango start/end
+  if (av && typeof av === "object" && isHHMM(av.start) && isHHMM(av.end)) {
+    const interval = Number(av.intervalMin ?? av.interval ?? 30);
+    const startM = toMinutes(av.start);
+    const endM = toMinutes(av.end);
+    if (Number.isNaN(startM) || Number.isNaN(endM) || interval <= 0) return [];
+
+    const breaks = normalizeBreaks(av.breaks);
+    const slots: string[] = [];
+    for (let m = startM; m + interval <= endM; m += interval) {
+      const t = toHHMM(m);
+      // si cae dentro de un break, lo saltamos
+      const inBreak = breaks.some((br) => timeInsideBreak(t, br));
+      if (!inBreak) slots.push(t);
+    }
+    return uniqueSortedSlots(slots);
+  }
+
+  return [];
 }
 
 export default function PacienteHome({ email }: { email: string }) {
@@ -237,9 +341,7 @@ export default function PacienteHome({ email }: { email: string }) {
   const [nutritionists, setNutritionists] = useState<Nutritionist[]>([]);
   const [selectedNutri, setSelectedNutri] = useState<Nutritionist | null>(null);
 
-  const [timeFilter, setTimeFilter] = useState<"todos" | "maniana" | "tarde">(
-    "todos"
-  );
+  const [timeFilter, setTimeFilter] = useState<"todos" | "maniana" | "tarde">("todos");
 
   const [availableSlots, setAvailableSlots] = useState<string[]>([]);
   const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set());
@@ -308,7 +410,6 @@ export default function PacienteHome({ email }: { email: string }) {
   useEffect(() => {
     const unsub = listenNutritionists((list) => {
       setNutritionists(list);
-      // si no hay seleccionado, seleccionamos el primero
       setSelectedNutri((prev) => prev ?? (list[0] || null));
     });
     return () => unsub();
@@ -321,33 +422,36 @@ export default function PacienteHome({ email }: { email: string }) {
     return () => unsub();
   }, [user]);
 
-  // Slots disponibles para el nutri + día
-  useEffect(() => {
-    if (!selectedNutri) {
-      setAvailableSlots([]);
-      return;
-    }
-    const dow = getDowKey(selectedDay);
-    const slots = getSlotsForNutriOnDay(selectedNutri, dow);
-
-    const filtered =
-      timeFilter === "todos"
-        ? slots
-        : slots.filter((t) => {
-            const hh = Number(t.split(":")[0]);
-            return timeFilter === "maniana" ? hh < 14 : hh >= 14;
-          });
-
-    setAvailableSlots(filtered);
-    setSelectedTime("");
-  }, [selectedNutri, selectedDay, timeFilter]);
-
-  // Listener realtime de ocupados (slots)
+  // Ocupados realtime (por nutri + día)
   useEffect(() => {
     if (!selectedNutri) return;
     const unsub = listenBookedSlotsForNutri(selectedNutri.uid, selectedDay, setBookedSlots);
     return () => unsub();
   }, [selectedNutri, selectedDay]);
+
+  // Slots disponibles para el nutri + día (robusto)
+  useEffect(() => {
+    if (!selectedNutri) {
+      setAvailableSlots([]);
+      setSelectedTime("");
+      return;
+    }
+
+    const dow = getDowKey(selectedDay);
+    const baseSlots = getSlotsForNutriOnDaySafe(selectedNutri as any, dow);
+
+    const filtered =
+      timeFilter === "todos"
+        ? baseSlots
+        : baseSlots.filter((t) => {
+            const hh = Number(String(t).split(":")[0]);
+            return timeFilter === "maniana" ? hh < 14 : hh >= 14;
+          });
+
+    setAvailableSlots(filtered);
+    // si cambiaste de día, reseteo selección
+    setSelectedTime("");
+  }, [selectedNutri, selectedDay, timeFilter]);
 
   const markedDates = useMemo(() => {
     const marks: any = {};
@@ -450,6 +554,7 @@ export default function PacienteHome({ email }: { email: string }) {
 
   async function requestAppointment() {
     if (!user) return;
+
     if (!selectedNutri) {
       toast("Elegí un nutricionista.");
       return;
@@ -481,7 +586,6 @@ export default function PacienteHome({ email }: { email: string }) {
 
       toast("Turno solicitado ✅");
 
-      // Email al paciente (no a vos)
       try {
         await sendAppointmentEmail({
           to_email: appt.patientEmail,
@@ -502,11 +606,10 @@ export default function PacienteHome({ email }: { email: string }) {
     }
   }
 
-  // ===== UI =====
   return (
     <PaperProvider>
       <View style={{ flex: 1, backgroundColor: theme.pageBg }}>
-        {/* HEADER */}
+        {/* HEADER: SOLO ICONO APP (sin casita ni manzana) */}
         <View
           style={{
             paddingHorizontal: 14,
@@ -526,195 +629,6 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0 }}
-              />
-              <IconButton
-                icon="food-apple"
-                iconColor="#FFFFFF"
-                onPress={() => {}}
-                style={{ margin: 0 }}
-              />
-              <IconButton
-                icon="arrow-left"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-              <IconButton
-                icon="image"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="alpha-n-circle"
-                iconColor="#FFFFFF"
-                onPress={() => {}}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="arrow-u-left-top"
-                iconColor="#FFFFFF"
-                onPress={() => {}}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              {/* ICON APP: vuelve al index */}
-              <IconButton
-                icon="leaf"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home-outline"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home-variant"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home-variant-outline"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              {/* el icon real */}
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              <IconButton
-                icon="home"
-                iconColor="#FFFFFF"
-                onPress={() => router.push("/")}
-                style={{ margin: 0, display: "none" as any }}
-              />
-
-              {/* ✅ este es el icon.png real */}
               <IconButton
                 icon={() => (
                   <Image
@@ -772,7 +686,12 @@ export default function PacienteHome({ email }: { email: string }) {
 
         <ScrollView contentContainerStyle={{ padding: 14, paddingBottom: 40 }}>
           {/* HERO */}
-          <Card style={[styles.sectionCard, { backgroundColor: theme.violetSoft, borderColor: theme.violetRing }]}>
+          <Card
+            style={[
+              styles.sectionCard,
+              { backgroundColor: theme.violetSoft, borderColor: theme.violetRing },
+            ]}
+          >
             <Card.Content>
               <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
                 Hola, {name || "Paciente"} 👋
@@ -792,13 +711,20 @@ export default function PacienteHome({ email }: { email: string }) {
                     backgroundColor: "#FFFFFF",
                   }}
                 >
-                  <Text style={{ fontWeight: "900", color: theme.text }}>
-                    Próximo turno:
-                  </Text>
+                  <Text style={{ fontWeight: "900", color: theme.text }}>Próximo turno:</Text>
                   <Text style={{ color: theme.muted, marginTop: 4 }}>
-                    Con <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.nutriName}</Text>{" "}
-                    el <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.date}</Text>{" "}
-                    a las <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.time}</Text>
+                    Con{" "}
+                    <Text style={{ fontWeight: "900", color: theme.text }}>
+                      {nextAppt.nutriName}
+                    </Text>{" "}
+                    el{" "}
+                    <Text style={{ fontWeight: "900", color: theme.text }}>
+                      {nextAppt.date}
+                    </Text>{" "}
+                    a las{" "}
+                    <Text style={{ fontWeight: "900", color: theme.text }}>
+                      {nextAppt.time}
+                    </Text>
                   </Text>
                 </View>
               ) : (
@@ -859,7 +785,12 @@ export default function PacienteHome({ email }: { email: string }) {
                     textColor={theme.text}
                   />
 
-                  <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={saveProfile}>
+                  <Button
+                    mode="contained"
+                    style={styles.primaryBtn}
+                    labelStyle={styles.primaryBtnText}
+                    onPress={saveProfile}
+                  >
                     Guardar datos
                   </Button>
                 </Card.Content>
@@ -868,7 +799,15 @@ export default function PacienteHome({ email }: { email: string }) {
               {/* PESO / GRÁFICO */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 8,
+                    }}
+                  >
                     <View>
                       <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
                         Progreso de peso
@@ -878,7 +817,12 @@ export default function PacienteHome({ email }: { email: string }) {
                       </Text>
                     </View>
 
-                    <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={() => setOpenWeightModal(true)}>
+                    <Button
+                      mode="contained"
+                      style={styles.primaryBtn}
+                      labelStyle={styles.primaryBtnText}
+                      onPress={() => setOpenWeightModal(true)}
+                    >
                       Medir peso
                     </Button>
                   </View>
@@ -933,10 +877,18 @@ export default function PacienteHome({ email }: { email: string }) {
                 </Card.Content>
               </Card>
 
-              {/* COMIDAS (scroll interno) */}
+              {/* COMIDAS */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 10,
+                    }}
+                  >
                     <View>
                       <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
                         Comidas
@@ -969,7 +921,13 @@ export default function PacienteHome({ email }: { email: string }) {
                           {meals.map((m) => (
                             <Card key={m.id} style={styles.innerCard}>
                               <Card.Content>
-                                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                <View
+                                  style={{
+                                    flexDirection: "row",
+                                    justifyContent: "space-between",
+                                    alignItems: "flex-start",
+                                  }}
+                                >
                                   <View style={{ flex: 1, paddingRight: 8 }}>
                                     <Text style={{ fontWeight: "900", color: theme.text }}>
                                       {formatDateLabel(m.date)} · {m.mealType}
@@ -1001,7 +959,10 @@ export default function PacienteHome({ email }: { email: string }) {
                                         ["Cumplimiento del plan", m.experience.cumplimiento],
                                       ].map(([label, val]) => (
                                         <Text key={String(label)} style={{ color: theme.muted, marginTop: 4 }}>
-                                          ⭐ {label}: <Text style={{ fontWeight: "900", color: theme.text }}>{val as number}/5</Text>
+                                          ⭐ {label}:{" "}
+                                          <Text style={{ fontWeight: "900", color: theme.text }}>
+                                            {val as number}/5
+                                          </Text>
                                         </Text>
                                       ))}
                                     </View>
@@ -1068,7 +1029,7 @@ export default function PacienteHome({ email }: { email: string }) {
 
                   <Divider style={{ marginVertical: 14, backgroundColor: theme.border2 }} />
 
-                  {/* NUTRICIONISTAS */}
+                  {/* NUTRICIONISTAS (CON FOTO, como querés) */}
                   <Text style={{ fontWeight: "900", color: theme.text }}>
                     Nutricionista
                   </Text>
@@ -1115,7 +1076,10 @@ export default function PacienteHome({ email }: { email: string }) {
                                     backgroundColor: active ? theme.violet : undefined,
                                     borderColor: theme.violet,
                                   }}
-                                  labelStyle={{ color: active ? "#FFFFFF" : theme.violet, fontWeight: "800" }}
+                                  labelStyle={{
+                                    color: active ? "#FFFFFF" : theme.violet,
+                                    fontWeight: "800",
+                                  }}
                                   onPress={() => setSelectedNutri(n)}
                                 >
                                   {active ? "Elegido" : "Elegir"}
@@ -1158,7 +1122,8 @@ export default function PacienteHome({ email }: { email: string }) {
                     }}
                   >
                     <Text style={{ color: theme.muted }}>
-                      Seleccionado: <Text style={{ fontWeight: "900", color: theme.text }}>{selectedDay}</Text>
+                      Seleccionado:{" "}
+                      <Text style={{ fontWeight: "900", color: theme.text }}>{selectedDay}</Text>
                     </Text>
 
                     {!selectedNutri ? (
@@ -1256,10 +1221,16 @@ export default function PacienteHome({ email }: { email: string }) {
                               {a.date} · {a.time}
                             </Text>
                             <Text style={{ color: theme.muted, marginTop: 4 }}>
-                              Con <Text style={{ fontWeight: "900", color: theme.text }}>{a.nutriName}</Text>
+                              Con{" "}
+                              <Text style={{ fontWeight: "900", color: theme.text }}>
+                                {a.nutriName}
+                              </Text>
                             </Text>
                             <Text style={{ color: theme.muted, marginTop: 4 }}>
-                              Estado: <Text style={{ fontWeight: "900", color: theme.text }}>{a.status}</Text>
+                              Estado:{" "}
+                              <Text style={{ fontWeight: "900", color: theme.text }}>
+                                {a.status}
+                              </Text>
                             </Text>
                           </View>
                         ))}
@@ -1386,7 +1357,7 @@ export default function PacienteHome({ email }: { email: string }) {
                 value={mealText}
                 onChangeText={setMealText}
                 multiline
-                style={[{ marginTop: 10 }, styles.input]}
+                style={[{ marginTop: 10 }]}
                 outlineColor={theme.border}
                 activeOutlineColor={theme.violet}
                 textColor={theme.text}
@@ -1407,36 +1378,12 @@ export default function PacienteHome({ email }: { email: string }) {
                   Experiencia (⭐)
                 </Text>
 
-                <StarRow
-                  label="General"
-                  value={mealExp.general}
-                  onChange={(v) => setMealExp((p) => ({ ...p, general: v }))}
-                />
-                <StarRow
-                  label="Saciedad"
-                  value={mealExp.saciedad}
-                  onChange={(v) => setMealExp((p) => ({ ...p, saciedad: v }))}
-                />
-                <StarRow
-                  label="Energía"
-                  value={mealExp.energia}
-                  onChange={(v) => setMealExp((p) => ({ ...p, energia: v }))}
-                />
-                <StarRow
-                  label="Digestión"
-                  value={mealExp.digestion}
-                  onChange={(v) => setMealExp((p) => ({ ...p, digestion: v }))}
-                />
-                <StarRow
-                  label="Ansiedad / Antojos"
-                  value={mealExp.ansiedad}
-                  onChange={(v) => setMealExp((p) => ({ ...p, ansiedad: v }))}
-                />
-                <StarRow
-                  label="Cumplimiento del plan"
-                  value={mealExp.cumplimiento}
-                  onChange={(v) => setMealExp((p) => ({ ...p, cumplimiento: v }))}
-                />
+                <StarRow label="General" value={mealExp.general} onChange={(v) => setMealExp((p) => ({ ...p, general: v }))} />
+                <StarRow label="Saciedad" value={mealExp.saciedad} onChange={(v) => setMealExp((p) => ({ ...p, saciedad: v }))} />
+                <StarRow label="Energía" value={mealExp.energia} onChange={(v) => setMealExp((p) => ({ ...p, energia: v }))} />
+                <StarRow label="Digestión" value={mealExp.digestion} onChange={(v) => setMealExp((p) => ({ ...p, digestion: v }))} />
+                <StarRow label="Ansiedad / Antojos" value={mealExp.ansiedad} onChange={(v) => setMealExp((p) => ({ ...p, ansiedad: v }))} />
+                <StarRow label="Cumplimiento del plan" value={mealExp.cumplimiento} onChange={(v) => setMealExp((p) => ({ ...p, cumplimiento: v }))} />
               </View>
 
               <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
@@ -1529,54 +1476,42 @@ export default function PacienteHome({ email }: { email: string }) {
                   label="General"
                   value={editingMeal?.experience?.general || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, general: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, general: v } } : p))
                   }
                 />
                 <StarRow
                   label="Saciedad"
                   value={editingMeal?.experience?.saciedad || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, saciedad: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, saciedad: v } } : p))
                   }
                 />
                 <StarRow
                   label="Energía"
                   value={editingMeal?.experience?.energia || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, energia: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, energia: v } } : p))
                   }
                 />
                 <StarRow
                   label="Digestión"
                   value={editingMeal?.experience?.digestion || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, digestion: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, digestion: v } } : p))
                   }
                 />
                 <StarRow
                   label="Ansiedad / Antojos"
                   value={editingMeal?.experience?.ansiedad || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, ansiedad: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, ansiedad: v } } : p))
                   }
                 />
                 <StarRow
                   label="Cumplimiento del plan"
                   value={editingMeal?.experience?.cumplimiento || 0}
                   onChange={(v) =>
-                    setEditingMeal((p) =>
-                      p ? { ...p, experience: { ...p.experience, cumplimiento: v } } : p
-                    )
+                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, cumplimiento: v } } : p))
                   }
                 />
               </View>
