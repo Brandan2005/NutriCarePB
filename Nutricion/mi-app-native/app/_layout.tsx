@@ -1,22 +1,35 @@
-import { useEffect } from "react";
-import { Platform } from "react-native";
+// app/_layout.tsx
+import React, { useEffect } from "react";
 import { Stack } from "expo-router";
-import "react-native-reanimated";
-
-import * as Font from "expo-font";
+import { Provider as PaperProvider } from "react-native-paper";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import { useFonts } from "expo-font";
+import { SplashScreen } from "expo-router";
+
+SplashScreen.preventAutoHideAsync();
 
 export const unstable_settings = {
   anchor: "(tabs)",
 };
 
 export default function RootLayout() {
-  useEffect(() => {
-    // ✅ Esto arregla los iconos "cuadrados" en Firebase Hosting / Web
-    if (Platform.OS === "web") {
-      Font.loadAsync(MaterialCommunityIcons.font).catch(() => {});
-    }
-  }, []);
+  const [loaded] = useFonts({
+    ...MaterialCommunityIcons.font,
+  });
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  useEffect(() => {
+    if (loaded) SplashScreen.hideAsync();
+  }, [loaded]);
+
+  if (!loaded) return null;
+
+  return (
+    <PaperProvider
+      settings={{
+        icon: (props) => <MaterialCommunityIcons {...props} />,
+      }}
+    >
+      <Stack screenOptions={{ headerShown: false }} />
+    </PaperProvider>
+  );
 }
