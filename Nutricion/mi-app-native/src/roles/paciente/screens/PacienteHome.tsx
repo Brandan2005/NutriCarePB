@@ -1,13 +1,5 @@
-// src/roles/paciente/screens/PacienteHome.tsx
-
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  View,
-  ScrollView,
-  Image,
-  useWindowDimensions,
-  Platform,
-} from "react-native";
+import { View, ScrollView, Image, useWindowDimensions, Platform } from "react-native";
 import {
   Button,
   Card,
@@ -36,7 +28,7 @@ import {
   listenAppointmentsByPatient,
   listenBookedSlotsForNutri,
 } from "../../../shared/services/appointments";
-import { listenNutritionists, Nutritionist } from "../../../shared/services/nutritionists";
+import { listenNutritionists, Nutritionist, getSlotsForNutriOnDay } from "../../../shared/services/nutritionists";
 import { sendAppointmentEmail } from "../../../shared/services/email";
 
 type WeightItem = { id: string; value: number; date: string };
@@ -74,7 +66,7 @@ function todayISO() {
 
 function getDowKey(dateISO: string) {
   const d = new Date(dateISO + "T00:00:00");
-  const n = d.getDay();
+  const n = d.getDay(); // 0..6
   const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
   return keys[n];
 }
@@ -109,114 +101,6 @@ function StarRow({
   );
 }
 
-/** ---------- TURNOS: helpers robustos (arregla availability + breaks) ---------- */
-function toMinutes(hhmm: string) {
-  const [h, m] = String(hhmm).split(":").map((x) => Number(x));
-  if (Number.isNaN(h) || Number.isNaN(m)) return NaN;
-  return h * 60 + m;
-}
-function toHHMM(min: number) {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-function isHHMM(x: any) {
-  return typeof x === "string" && /^\d{2}:\d{2}$/.test(x.trim());
-}
-function isRangeStr(x: any) {
-  return typeof x === "string" && /^\d{2}:\d{2}\s*-\s*\d{2}:\d{2}$/.test(x.trim());
-}
-
-type BreakRange = { start: string; end: string };
-
-function normalizeBreaks(input: any): BreakRange[] {
-  // Soporta:
-  // - breaks: [{start,end}]
-  // - breaks: {a:{start,end}, b:{start,end}}
-  // - breaks: ["10:00-10:30", ...]
-  // - breaks: [{from,to}] etc
-  const raw = Array.isArray(input)
-    ? input
-    : input && typeof input === "object"
-    ? Object.values(input)
-    : [];
-
-  const out: BreakRange[] = [];
-  for (const b of raw) {
-    if (!b) continue;
-
-    if (isRangeStr(b)) {
-      const [s, e] = b.replace(/\s/g, "").split("-");
-      out.push({ start: s, end: e });
-      continue;
-    }
-
-    const start = (b.start ?? b.from ?? b.ini ?? b.begin) as any;
-    const end = (b.end ?? b.to ?? b.fin ?? b.until) as any;
-
-    if (isHHMM(start) && isHHMM(end)) out.push({ start, end });
-  }
-  return out;
-}
-
-function timeInsideBreak(t: string, br: BreakRange) {
-  const tm = toMinutes(t);
-  const s = toMinutes(br.start);
-  const e = toMinutes(br.end);
-  if ([tm, s, e].some((x) => Number.isNaN(x))) return false;
-  return tm >= s && tm < e;
-}
-
-function uniqueSortedSlots(slots: string[]) {
-  const clean = slots
-    .filter((t) => isHHMM(t))
-    .map((t) => t.trim());
-  const set = Array.from(new Set(clean));
-  set.sort((a, b) => toMinutes(a) - toMinutes(b));
-  return set;
-}
-
-/**
- * Lee la disponibilidad del nutri sin depender de un único formato.
- * Acepta:
- * - availability[dow] = ["09:00","09:30",...]
- * - availability[dow] = { slots: [...] }
- * - availability[dow] = { start:"09:00", end:"13:00", intervalMin:30, breaks:[...] }
- */
-function getSlotsForNutriOnDaySafe(nutri: any, dow: string): string[] {
-  const av = nutri?.availability?.[dow];
-
-  // 1) Si ya viene como array de slots
-  if (Array.isArray(av)) {
-    return uniqueSortedSlots(av);
-  }
-
-  // 2) Si viene como objeto con slots
-  if (av && typeof av === "object" && Array.isArray(av.slots)) {
-    return uniqueSortedSlots(av.slots);
-  }
-
-  // 3) Si viene como rango start/end
-  if (av && typeof av === "object" && isHHMM(av.start) && isHHMM(av.end)) {
-    const interval = Number(av.intervalMin ?? av.interval ?? 30);
-    const startM = toMinutes(av.start);
-    const endM = toMinutes(av.end);
-    if (Number.isNaN(startM) || Number.isNaN(endM) || interval <= 0) return [];
-
-    const breaks = normalizeBreaks(av.breaks);
-    const slots: string[] = [];
-    for (let m = startM; m + interval <= endM; m += interval) {
-      const t = toHHMM(m);
-      // si cae dentro de un break, lo saltamos
-      const inBreak = breaks.some((br) => timeInsideBreak(t, br));
-      if (!inBreak) slots.push(t);
-    }
-    return uniqueSortedSlots(slots);
-  }
-
-  return [];
-}
-
 export default function PacienteHome({ email }: { email: string }) {
   const user = auth.currentUser;
 
@@ -224,17 +108,13 @@ export default function PacienteHome({ email }: { email: string }) {
   const isWide = width >= 980;
   const isNarrow = width < 520;
 
-  const [snack, setSnack] = useState<{ open: boolean; msg: string }>({
-    open: false,
-    msg: "",
-  });
+  const [snack, setSnack] = useState<{ open: boolean; msg: string }>({ open: false, msg: "" });
   const toast = (msg: string) => setSnack({ open: true, msg });
 
   // ===== Theme =====
   const theme = useMemo(
     () => ({
       violet: "#6D28D9",
-      violet2: "#8B5CF6",
       violetSoft: "#F3E8FF",
       violetRing: "#DDD6FE",
 
@@ -284,10 +164,6 @@ export default function PacienteHome({ email }: { email: string }) {
         backgroundColor: theme.violet,
       } as any,
       primaryBtnText: { color: "#FFFFFF", fontWeight: "800" } as any,
-      secondaryBtn: {
-        borderRadius: 14,
-        borderColor: theme.violet,
-      } as any,
       pill: {
         borderRadius: 999,
         borderWidth: 1,
@@ -337,7 +213,6 @@ export default function PacienteHome({ email }: { email: string }) {
 
   // ===== Turnos =====
   const [selectedDay, setSelectedDay] = useState(todayISO());
-
   const [nutritionists, setNutritionists] = useState<Nutritionist[]>([]);
   const [selectedNutri, setSelectedNutri] = useState<Nutritionist | null>(null);
 
@@ -346,7 +221,6 @@ export default function PacienteHome({ email }: { email: string }) {
   const [availableSlots, setAvailableSlots] = useState<string[]>([]);
   const [bookedSlots, setBookedSlots] = useState<Set<string>>(new Set());
   const [selectedTime, setSelectedTime] = useState<string>("");
-
   const [creating, setCreating] = useState(false);
 
   // Mis turnos
@@ -422,14 +296,14 @@ export default function PacienteHome({ email }: { email: string }) {
     return () => unsub();
   }, [user]);
 
-  // Ocupados realtime (por nutri + día)
+  // Slots ocupados realtime (por día)
   useEffect(() => {
     if (!selectedNutri) return;
     const unsub = listenBookedSlotsForNutri(selectedNutri.uid, selectedDay, setBookedSlots);
     return () => unsub();
   }, [selectedNutri, selectedDay]);
 
-  // Slots disponibles para el nutri + día (robusto)
+  // Slots disponibles (recalcula SIEMPRE que cambia fecha/nutri/filtro)
   useEffect(() => {
     if (!selectedNutri) {
       setAvailableSlots([]);
@@ -438,18 +312,18 @@ export default function PacienteHome({ email }: { email: string }) {
     }
 
     const dow = getDowKey(selectedDay);
-    const baseSlots = getSlotsForNutriOnDaySafe(selectedNutri as any, dow);
+    const all = getSlotsForNutriOnDay(selectedNutri, dow);
 
+    // filtro mañana/tarde: tarde si hh >= 13
     const filtered =
       timeFilter === "todos"
-        ? baseSlots
-        : baseSlots.filter((t) => {
-            const hh = Number(String(t).split(":")[0]);
-            return timeFilter === "maniana" ? hh < 14 : hh >= 14;
+        ? all
+        : all.filter((t) => {
+            const hh = Number(t.split(":")[0]);
+            return timeFilter === "maniana" ? hh < 13 : hh >= 13;
           });
 
     setAvailableSlots(filtered);
-    // si cambiaste de día, reseteo selección
     setSelectedTime("");
   }, [selectedNutri, selectedDay, timeFilter]);
 
@@ -462,10 +336,7 @@ export default function PacienteHome({ email }: { email: string }) {
   const chartData = useMemo(() => {
     return weights
       .filter((w) => w.date && !Number.isNaN(w.value) && w.value > 0)
-      .map((w) => ({
-        value: w.value,
-        label: formatDateLabel(w.date),
-      }));
+      .map((w) => ({ value: w.value, label: formatDateLabel(w.date) }));
   }, [weights]);
 
   const chartMax = useMemo(() => {
@@ -554,19 +425,10 @@ export default function PacienteHome({ email }: { email: string }) {
 
   async function requestAppointment() {
     if (!user) return;
+    if (!selectedNutri) return toast("Elegí un nutricionista.");
+    if (!selectedTime) return toast("Elegí un horario.");
 
-    if (!selectedNutri) {
-      toast("Elegí un nutricionista.");
-      return;
-    }
-    if (!selectedTime) {
-      toast("Elegí un horario.");
-      return;
-    }
-    if (bookedSlots.has(selectedTime)) {
-      toast("Ese horario ya está ocupado. Elegí otro.");
-      return;
-    }
+    if (bookedSlots.has(selectedTime)) return toast("Ese horario ya está ocupado.");
 
     setCreating(true);
     try {
@@ -586,6 +448,7 @@ export default function PacienteHome({ email }: { email: string }) {
 
       toast("Turno solicitado ✅");
 
+      // mail al paciente (al email registrado)
       try {
         await sendAppointmentEmail({
           to_email: appt.patientEmail,
@@ -609,7 +472,7 @@ export default function PacienteHome({ email }: { email: string }) {
   return (
     <PaperProvider>
       <View style={{ flex: 1, backgroundColor: theme.pageBg }}>
-        {/* HEADER: SOLO ICONO APP (sin casita ni manzana) */}
+        {/* HEADER */}
         <View
           style={{
             paddingHorizontal: 14,
@@ -628,6 +491,7 @@ export default function PacienteHome({ email }: { email: string }) {
               gap: 10,
             }}
           >
+            {/* izquierda */}
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
               <IconButton
                 icon={() => (
@@ -641,10 +505,7 @@ export default function PacienteHome({ email }: { email: string }) {
               />
 
               <View>
-                <Text
-                  variant="titleMedium"
-                  style={{ color: theme.headerText, fontWeight: "900" }}
-                >
+                <Text variant="titleMedium" style={{ color: theme.headerText, fontWeight: "900" }}>
                   NutriCare
                 </Text>
                 <Text style={{ color: theme.headerMuted, fontSize: 12, marginTop: -2 }}>
@@ -653,15 +514,8 @@ export default function PacienteHome({ email }: { email: string }) {
               </View>
             </View>
 
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-                justifyContent: isNarrow ? "flex-start" : "flex-end",
-              }}
-            >
+            {/* derecha */}
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               {photoURL ? (
                 <Avatar.Image size={36} source={{ uri: photoURL }} />
               ) : (
@@ -669,12 +523,8 @@ export default function PacienteHome({ email }: { email: string }) {
               )}
 
               <View style={{ maxWidth: 240 }}>
-                <Text style={{ color: theme.headerText, fontWeight: "900" }}>
-                  {name || "Paciente"}
-                </Text>
-                <Text style={{ color: theme.headerMuted, fontSize: 11 }}>
-                  {user?.email || email}
-                </Text>
+                <Text style={{ color: theme.headerText, fontWeight: "900" }}>{name || "Paciente"}</Text>
+                <Text style={{ color: theme.headerMuted, fontSize: 11 }}>{user?.email || email}</Text>
               </View>
 
               <Button mode="text" textColor="#FCA5A5" onPress={() => signOut(auth)}>
@@ -686,12 +536,7 @@ export default function PacienteHome({ email }: { email: string }) {
 
         <ScrollView contentContainerStyle={{ padding: 14, paddingBottom: 40 }}>
           {/* HERO */}
-          <Card
-            style={[
-              styles.sectionCard,
-              { backgroundColor: theme.violetSoft, borderColor: theme.violetRing },
-            ]}
-          >
+          <Card style={[styles.sectionCard, { backgroundColor: theme.violetSoft, borderColor: theme.violetRing }]}>
             <Card.Content>
               <Text style={{ color: "#4C1D95", fontSize: 18, fontWeight: "900" }}>
                 Hola, {name || "Paciente"} 👋
@@ -713,18 +558,9 @@ export default function PacienteHome({ email }: { email: string }) {
                 >
                   <Text style={{ fontWeight: "900", color: theme.text }}>Próximo turno:</Text>
                   <Text style={{ color: theme.muted, marginTop: 4 }}>
-                    Con{" "}
-                    <Text style={{ fontWeight: "900", color: theme.text }}>
-                      {nextAppt.nutriName}
-                    </Text>{" "}
-                    el{" "}
-                    <Text style={{ fontWeight: "900", color: theme.text }}>
-                      {nextAppt.date}
-                    </Text>{" "}
-                    a las{" "}
-                    <Text style={{ fontWeight: "900", color: theme.text }}>
-                      {nextAppt.time}
-                    </Text>
+                    Con <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.nutriName}</Text>{" "}
+                    el <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.date}</Text>{" "}
+                    a las <Text style={{ fontWeight: "900", color: theme.text }}>{nextAppt.time}</Text>
                   </Text>
                 </View>
               ) : (
@@ -744,9 +580,7 @@ export default function PacienteHome({ email }: { email: string }) {
               {/* PERFIL */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                    Datos del perfil
-                  </Text>
+                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Datos del perfil</Text>
                   <Text style={{ color: theme.muted, marginTop: 6 }}>
                     Mantené tus datos actualizados para tu seguimiento.
                   </Text>
@@ -785,69 +619,35 @@ export default function PacienteHome({ email }: { email: string }) {
                     textColor={theme.text}
                   />
 
-                  <Button
-                    mode="contained"
-                    style={styles.primaryBtn}
-                    labelStyle={styles.primaryBtnText}
-                    onPress={saveProfile}
-                  >
+                  <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={saveProfile}>
                     Guardar datos
                   </Button>
                 </Card.Content>
               </Card>
 
-              {/* PESO / GRÁFICO */}
+              {/* PESO */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: 8,
-                    }}
-                  >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                     <View>
-                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                        Progreso de peso
-                      </Text>
-                      <Text style={{ color: theme.muted, marginTop: 6 }}>
-                        Visualizá tu evolución por fecha.
-                      </Text>
+                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Progreso de peso</Text>
+                      <Text style={{ color: theme.muted, marginTop: 6 }}>Visualizá tu evolución por fecha.</Text>
                     </View>
 
-                    <Button
-                      mode="contained"
-                      style={styles.primaryBtn}
-                      labelStyle={styles.primaryBtnText}
-                      onPress={() => setOpenWeightModal(true)}
-                    >
+                    <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={() => setOpenWeightModal(true)}>
                       Medir peso
                     </Button>
                   </View>
 
                   <View style={{ marginTop: 12 }}>
                     {chartData.length >= 2 ? (
-                      <View
-                        style={{
-                          backgroundColor: "#FFFFFF",
-                          borderRadius: 18,
-                          paddingVertical: 10,
-                          paddingHorizontal: 8,
-                          borderWidth: 1,
-                          borderColor: theme.border2,
-                        }}
-                      >
+                      <View style={{ backgroundColor: "#FFFFFF", borderRadius: 18, paddingVertical: 10, paddingHorizontal: 8, borderWidth: 1, borderColor: theme.border2 }}>
                         <LineChart
                           data={chartData}
                           spacing={44}
                           initialSpacing={10}
                           thickness={3}
                           curved
-                          hideDataPoints={false}
-                          dataPointsHeight={8}
-                          dataPointsWidth={8}
                           yAxisTextStyle={{ color: theme.muted }}
                           xAxisLabelTextStyle={{ color: theme.muted, fontSize: 12 }}
                           yAxisLabelSuffix="kg"
@@ -859,18 +659,8 @@ export default function PacienteHome({ email }: { email: string }) {
                         />
                       </View>
                     ) : (
-                      <View
-                        style={{
-                          padding: 16,
-                          backgroundColor: "#FFFFFF",
-                          borderRadius: 18,
-                          borderWidth: 1,
-                          borderColor: theme.border2,
-                        }}
-                      >
-                        <Text style={{ color: theme.muted }}>
-                          Cargá al menos 2 registros de peso para ver el gráfico.
-                        </Text>
+                      <View style={{ padding: 16, backgroundColor: "#FFFFFF", borderRadius: 18, borderWidth: 1, borderColor: theme.border2 }}>
+                        <Text style={{ color: theme.muted }}>Cargá al menos 2 registros de peso para ver el gráfico.</Text>
                       </View>
                     )}
                   </View>
@@ -880,30 +670,13 @@ export default function PacienteHome({ email }: { email: string }) {
               {/* COMIDAS */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: 10,
-                    }}
-                  >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
                     <View>
-                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                        Comidas
-                      </Text>
-                      <Text style={{ color: theme.muted, marginTop: 4 }}>
-                        Historial por fecha + experiencia ⭐
-                      </Text>
+                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas</Text>
+                      <Text style={{ color: theme.muted, marginTop: 4 }}>Historial por fecha + experiencia ⭐</Text>
                     </View>
 
-                    <Button
-                      mode="contained"
-                      style={styles.primaryBtn}
-                      labelStyle={styles.primaryBtnText}
-                      onPress={() => setOpenMealModal(true)}
-                    >
+                    <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={() => setOpenMealModal(true)}>
                       Agregar
                     </Button>
                   </View>
@@ -913,42 +686,21 @@ export default function PacienteHome({ email }: { email: string }) {
                   <View style={{ maxHeight: isWide ? 420 : 320 }}>
                     <ScrollView>
                       {meals.length === 0 ? (
-                        <Text style={{ color: theme.muted }}>
-                          Todavía no cargaste comidas. Tocá “Agregar”.
-                        </Text>
+                        <Text style={{ color: theme.muted }}>Todavía no cargaste comidas. Tocá “Agregar”.</Text>
                       ) : (
                         <View style={{ gap: 10, paddingBottom: 4 }}>
                           {meals.map((m) => (
                             <Card key={m.id} style={styles.innerCard}>
                               <Card.Content>
-                                <View
-                                  style={{
-                                    flexDirection: "row",
-                                    justifyContent: "space-between",
-                                    alignItems: "flex-start",
-                                  }}
-                                >
+                                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                                   <View style={{ flex: 1, paddingRight: 8 }}>
                                     <Text style={{ fontWeight: "900", color: theme.text }}>
                                       {formatDateLabel(m.date)} · {m.mealType}
                                     </Text>
-                                    <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>
-                                      {m.text}
-                                    </Text>
+                                    <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
 
-                                    <View
-                                      style={{
-                                        marginTop: 10,
-                                        padding: 12,
-                                        borderRadius: 16,
-                                        borderWidth: 1,
-                                        borderColor: theme.border2,
-                                        backgroundColor: "#FFFFFF",
-                                      }}
-                                    >
-                                      <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>
-                                        Experiencia
-                                      </Text>
+                                    <View style={{ marginTop: 10, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
+                                      <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
 
                                       {[
                                         ["General", m.experience.general],
@@ -959,26 +711,15 @@ export default function PacienteHome({ email }: { email: string }) {
                                         ["Cumplimiento del plan", m.experience.cumplimiento],
                                       ].map(([label, val]) => (
                                         <Text key={String(label)} style={{ color: theme.muted, marginTop: 4 }}>
-                                          ⭐ {label}:{" "}
-                                          <Text style={{ fontWeight: "900", color: theme.text }}>
-                                            {val as number}/5
-                                          </Text>
+                                          ⭐ {label}: <Text style={{ fontWeight: "900", color: theme.text }}>{val as number}/5</Text>
                                         </Text>
                                       ))}
                                     </View>
                                   </View>
 
                                   <View style={{ flexDirection: "row" }}>
-                                    <IconButton
-                                      icon="pencil"
-                                      iconColor={theme.violet}
-                                      onPress={() => setEditingMeal({ ...m })}
-                                    />
-                                    <IconButton
-                                      icon="trash-can-outline"
-                                      iconColor={theme.danger}
-                                      onPress={() => deleteMeal(m.id)}
-                                    />
+                                    <IconButton icon="pencil" iconColor={theme.violet} onPress={() => setEditingMeal({ ...m })} />
+                                    <IconButton icon="trash-can-outline" iconColor={theme.danger} onPress={() => deleteMeal(m.id)} />
                                   </View>
                                 </View>
                               </Card.Content>
@@ -997,9 +738,7 @@ export default function PacienteHome({ email }: { email: string }) {
               {/* TURNOS */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                    Turnos
-                  </Text>
+                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Turnos</Text>
                   <Text style={{ color: theme.muted, marginTop: 6 }}>
                     Elegí un día y un horario. Los turnos ocupados no se pueden seleccionar.
                   </Text>
@@ -1029,16 +768,12 @@ export default function PacienteHome({ email }: { email: string }) {
 
                   <Divider style={{ marginVertical: 14, backgroundColor: theme.border2 }} />
 
-                  {/* NUTRICIONISTAS (CON FOTO, como querés) */}
-                  <Text style={{ fontWeight: "900", color: theme.text }}>
-                    Nutricionista
-                  </Text>
+                  {/* NUTRICIONISTAS */}
+                  <Text style={{ fontWeight: "900", color: theme.text }}>Nutricionista</Text>
 
                   <View style={{ marginTop: 10, gap: 8 }}>
                     {nutritionists.length === 0 ? (
-                      <Text style={{ color: theme.muted }}>
-                        No hay nutricionistas cargados (role="nutricionista").
-                      </Text>
+                      <Text style={{ color: theme.muted }}>No hay nutricionistas cargados (role="nutricionista").</Text>
                     ) : (
                       nutritionists.map((n) => {
                         const active = selectedNutri?.uid === n.uid;
@@ -1061,12 +796,8 @@ export default function PacienteHome({ email }: { email: string }) {
                                 )}
 
                                 <View style={{ flex: 1 }}>
-                                  <Text style={{ fontWeight: "900", color: theme.text }}>
-                                    {n.name}
-                                  </Text>
-                                  <Text style={{ color: theme.muted, fontSize: 12 }}>
-                                    {n.email}
-                                  </Text>
+                                  <Text style={{ fontWeight: "900", color: theme.text }}>{n.name}</Text>
+                                  <Text style={{ color: theme.muted, fontSize: 12 }}>{n.email}</Text>
                                 </View>
 
                                 <Button
@@ -1076,10 +807,7 @@ export default function PacienteHome({ email }: { email: string }) {
                                     backgroundColor: active ? theme.violet : undefined,
                                     borderColor: theme.violet,
                                   }}
-                                  labelStyle={{
-                                    color: active ? "#FFFFFF" : theme.violet,
-                                    fontWeight: "800",
-                                  }}
+                                  labelStyle={{ color: active ? "#FFFFFF" : theme.violet, fontWeight: "800" }}
                                   onPress={() => setSelectedNutri(n)}
                                 >
                                   {active ? "Elegido" : "Elegir"}
@@ -1095,10 +823,7 @@ export default function PacienteHome({ email }: { email: string }) {
                   <Divider style={{ marginVertical: 14, backgroundColor: theme.border2 }} />
 
                   {/* FILTRO HORAS */}
-                  <Text style={{ fontWeight: "900", color: theme.text }}>
-                    Filtrar horarios
-                  </Text>
-
+                  <Text style={{ fontWeight: "900", color: theme.text }}>Filtrar horarios</Text>
                   <View style={{ marginTop: 10 }}>
                     <SegmentedButtons
                       value={timeFilter}
@@ -1111,28 +836,17 @@ export default function PacienteHome({ email }: { email: string }) {
                     />
                   </View>
 
-                  <View
-                    style={{
-                      marginTop: 12,
-                      padding: 12,
-                      borderRadius: 16,
-                      borderWidth: 1,
-                      borderColor: theme.border2,
-                      backgroundColor: "#FFFFFF",
-                    }}
-                  >
+                  {/* HORARIOS */}
+                  <View style={{ marginTop: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
                     <Text style={{ color: theme.muted }}>
-                      Seleccionado:{" "}
-                      <Text style={{ fontWeight: "900", color: theme.text }}>{selectedDay}</Text>
+                      Seleccionado: <Text style={{ fontWeight: "900", color: theme.text }}>{selectedDay}</Text>
                     </Text>
 
                     {!selectedNutri ? (
-                      <Text style={{ color: theme.muted, marginTop: 8 }}>
-                        Elegí un nutricionista para ver horarios.
-                      </Text>
+                      <Text style={{ color: theme.muted, marginTop: 8 }}>Elegí un nutricionista para ver horarios.</Text>
                     ) : availableSlots.length === 0 ? (
                       <Text style={{ color: theme.muted, marginTop: 8 }}>
-                        No hay horarios configurados para este día (revisá availability).
+                        No hay horarios configurados para este día (revisá availability del nutricionista).
                       </Text>
                     ) : (
                       <View style={{ marginTop: 10, flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -1145,11 +859,7 @@ export default function PacienteHome({ email }: { email: string }) {
                               disabled={ocupado}
                               style={{
                                 borderRadius: 999,
-                                backgroundColor: ocupado
-                                  ? "#F1F5F9"
-                                  : selected
-                                  ? theme.violet
-                                  : theme.violetSoft,
+                                backgroundColor: ocupado ? "#F1F5F9" : selected ? theme.violet : theme.violetSoft,
                                 borderWidth: 1,
                                 borderColor: ocupado ? theme.border2 : theme.violetRing,
                               }}
@@ -1190,12 +900,8 @@ export default function PacienteHome({ email }: { email: string }) {
               {/* MIS TURNOS */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                    Mis turnos
-                  </Text>
-                  <Text style={{ color: theme.muted, marginTop: 6 }}>
-                    Tus turnos solicitados y próximos.
-                  </Text>
+                  <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Mis turnos</Text>
+                  <Text style={{ color: theme.muted, marginTop: 6 }}>Tus turnos solicitados y próximos.</Text>
 
                   <Divider style={{ marginVertical: 14, backgroundColor: theme.border2 }} />
 
@@ -1207,30 +913,15 @@ export default function PacienteHome({ email }: { email: string }) {
                         .filter((a) => a.status !== "cancelado")
                         .slice(0, 8)
                         .map((a) => (
-                          <View
-                            key={a.id}
-                            style={{
-                              padding: 12,
-                              borderRadius: 16,
-                              borderWidth: 1,
-                              borderColor: theme.border2,
-                              backgroundColor: "#FFFFFF",
-                            }}
-                          >
+                          <View key={a.id} style={{ padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
                             <Text style={{ fontWeight: "900", color: theme.text }}>
                               {a.date} · {a.time}
                             </Text>
                             <Text style={{ color: theme.muted, marginTop: 4 }}>
-                              Con{" "}
-                              <Text style={{ fontWeight: "900", color: theme.text }}>
-                                {a.nutriName}
-                              </Text>
+                              Con <Text style={{ fontWeight: "900", color: theme.text }}>{a.nutriName}</Text>
                             </Text>
                             <Text style={{ color: theme.muted, marginTop: 4 }}>
-                              Estado:{" "}
-                              <Text style={{ fontWeight: "900", color: theme.text }}>
-                                {a.status}
-                              </Text>
+                              Estado: <Text style={{ fontWeight: "900", color: theme.text }}>{a.status}</Text>
                             </Text>
                           </View>
                         ))}
@@ -1259,12 +950,8 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <ScrollView>
-              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                Registrar peso
-              </Text>
-              <Text style={{ color: theme.muted, marginTop: 6 }}>
-                Guardalo y se verá en tu gráfico.
-              </Text>
+              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Registrar peso</Text>
+              <Text style={{ color: theme.muted, marginTop: 6 }}>Guardalo y se verá en tu gráfico.</Text>
 
               <TextInput
                 label="Peso (kg)"
@@ -1290,15 +977,8 @@ export default function PacienteHome({ email }: { email: string }) {
               />
 
               <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
-                <Button onPress={() => setOpenWeightModal(false)} textColor={theme.text}>
-                  Cancelar
-                </Button>
-                <Button
-                  mode="contained"
-                  style={styles.primaryBtn}
-                  labelStyle={styles.primaryBtnText}
-                  onPress={addWeight}
-                >
+                <Button onPress={() => setOpenWeightModal(false)} textColor={theme.text}>Cancelar</Button>
+                <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={addWeight}>
                   Guardar
                 </Button>
               </View>
@@ -1323,12 +1003,8 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <ScrollView>
-              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                Agregar comida
-              </Text>
-              <Text style={{ color: theme.muted, marginTop: 6 }}>
-                Fecha, tipo de comida y experiencia.
-              </Text>
+              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
+              <Text style={{ color: theme.muted, marginTop: 6 }}>Fecha, tipo de comida y experiencia.</Text>
 
               <TextInput
                 label="Fecha (YYYY-MM-DD)"
@@ -1357,26 +1033,15 @@ export default function PacienteHome({ email }: { email: string }) {
                 value={mealText}
                 onChangeText={setMealText}
                 multiline
-                style={[{ marginTop: 10 }]}
+                style={[{ marginTop: 10 }, styles.input]}
                 outlineColor={theme.border}
                 activeOutlineColor={theme.violet}
                 textColor={theme.text}
                 mode="outlined"
               />
 
-              <View
-                style={{
-                  marginTop: 12,
-                  padding: 12,
-                  borderRadius: 16,
-                  borderWidth: 1,
-                  borderColor: theme.border2,
-                  backgroundColor: "#FFFFFF",
-                }}
-              >
-                <Text style={{ fontWeight: "900", color: theme.text }}>
-                  Experiencia (⭐)
-                </Text>
+              <View style={{ marginTop: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
+                <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia (⭐)</Text>
 
                 <StarRow label="General" value={mealExp.general} onChange={(v) => setMealExp((p) => ({ ...p, general: v }))} />
                 <StarRow label="Saciedad" value={mealExp.saciedad} onChange={(v) => setMealExp((p) => ({ ...p, saciedad: v }))} />
@@ -1387,15 +1052,8 @@ export default function PacienteHome({ email }: { email: string }) {
               </View>
 
               <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
-                <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
-                  Cancelar
-                </Button>
-                <Button
-                  mode="contained"
-                  style={styles.primaryBtn}
-                  labelStyle={styles.primaryBtnText}
-                  onPress={addMeal}
-                >
+                <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>Cancelar</Button>
+                <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={addMeal}>
                   Guardar
                 </Button>
               </View>
@@ -1420,9 +1078,7 @@ export default function PacienteHome({ email }: { email: string }) {
             }}
           >
             <ScrollView>
-              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                Editar comida
-              </Text>
+              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Editar comida</Text>
 
               <TextInput
                 label="Fecha (YYYY-MM-DD)"
@@ -1458,74 +1114,20 @@ export default function PacienteHome({ email }: { email: string }) {
                 mode="outlined"
               />
 
-              <View
-                style={{
-                  marginTop: 12,
-                  padding: 12,
-                  borderRadius: 16,
-                  borderWidth: 1,
-                  borderColor: theme.border2,
-                  backgroundColor: "#FFFFFF",
-                }}
-              >
-                <Text style={{ fontWeight: "900", color: theme.text }}>
-                  Experiencia (⭐)
-                </Text>
+              <View style={{ marginTop: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
+                <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia (⭐)</Text>
 
-                <StarRow
-                  label="General"
-                  value={editingMeal?.experience?.general || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, general: v } } : p))
-                  }
-                />
-                <StarRow
-                  label="Saciedad"
-                  value={editingMeal?.experience?.saciedad || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, saciedad: v } } : p))
-                  }
-                />
-                <StarRow
-                  label="Energía"
-                  value={editingMeal?.experience?.energia || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, energia: v } } : p))
-                  }
-                />
-                <StarRow
-                  label="Digestión"
-                  value={editingMeal?.experience?.digestion || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, digestion: v } } : p))
-                  }
-                />
-                <StarRow
-                  label="Ansiedad / Antojos"
-                  value={editingMeal?.experience?.ansiedad || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, ansiedad: v } } : p))
-                  }
-                />
-                <StarRow
-                  label="Cumplimiento del plan"
-                  value={editingMeal?.experience?.cumplimiento || 0}
-                  onChange={(v) =>
-                    setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, cumplimiento: v } } : p))
-                  }
-                />
+                <StarRow label="General" value={editingMeal?.experience?.general || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, general: v } } : p))} />
+                <StarRow label="Saciedad" value={editingMeal?.experience?.saciedad || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, saciedad: v } } : p))} />
+                <StarRow label="Energía" value={editingMeal?.experience?.energia || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, energia: v } } : p))} />
+                <StarRow label="Digestión" value={editingMeal?.experience?.digestion || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, digestion: v } } : p))} />
+                <StarRow label="Ansiedad / Antojos" value={editingMeal?.experience?.ansiedad || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, ansiedad: v } } : p))} />
+                <StarRow label="Cumplimiento del plan" value={editingMeal?.experience?.cumplimiento || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, cumplimiento: v } } : p))} />
               </View>
 
               <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
-                <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
-                  Cancelar
-                </Button>
-                <Button
-                  mode="contained"
-                  style={styles.primaryBtn}
-                  labelStyle={styles.primaryBtnText}
-                  onPress={saveMealEdit}
-                >
+                <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>Cancelar</Button>
+                <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={saveMealEdit}>
                   Guardar cambios
                 </Button>
               </View>
@@ -1533,11 +1135,7 @@ export default function PacienteHome({ email }: { email: string }) {
           </Modal>
         </Portal>
 
-        <Snackbar
-          visible={snack.open}
-          onDismiss={() => setSnack({ open: false, msg: "" })}
-          duration={2500}
-        >
+        <Snackbar visible={snack.open} onDismiss={() => setSnack({ open: false, msg: "" })} duration={2500}>
           {snack.msg}
         </Snackbar>
       </View>

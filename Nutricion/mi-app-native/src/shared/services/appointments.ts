@@ -1,4 +1,4 @@
-import { ref, push, set, runTransaction, update, remove, onValue, off, get } from "firebase/database";
+import { onValue, ref, push, runTransaction, update, remove } from "firebase/database";
 import { rtdb } from "./firebase";
 
 export type AppointmentStatus = "pendiente" | "cancelado" | "asistio" | "no_asistio";
@@ -14,11 +14,10 @@ export type Appointment = {
   nutriName: string;
   nutriEmail: string;
 
-  date: string; // YYYY-MM-DD
-  time: string; // HH:mm (cada 30min)
-
-  startAt: number; // timestamp ms
-  endAt: number;   // timestamp ms
+  date: string;      // YYYY-MM-DD
+  time: string;      // HH:mm
+  startAt: number;   // ms
+  endAt: number;     // ms
 
   status: AppointmentStatus;
   createdAt: number;
@@ -34,9 +33,7 @@ function toTimestamp(dateYYYYMMDD: string, timeHHmm: string) {
 }
 
 /**
- * Reserva turno ATÓMICO:
- * - bloquea slots/nutri/date/time con transaction
- * - si está libre, crea appointment y duplica índices
+ * Reserva turno ATÓMICO usando slots/{nutriUid}/{date}/{time} = apptId
  */
 export async function bookAppointment(input: {
   patientUid: string;
@@ -59,9 +56,9 @@ export async function bookAppointment(input: {
   const apptId = push(ref(rtdb, "appointments")).key!;
   const slotRef = ref(rtdb, `slots/${input.nutriUid}/${input.date}/${input.time}`);
 
-  // 1) Transaction: si ya existe, está ocupado
+  // si ya existe => ocupado
   const tx = await runTransaction(slotRef, (current) => {
-    if (current) return; // ya ocupado
+    if (current) return; // ocupado
     return apptId;       // reservar
   });
 
@@ -71,7 +68,6 @@ export async function bookAppointment(input: {
     throw err;
   }
 
-  // 2) Crear appointment
   const appt: Appointment = {
     id: apptId,
 
@@ -113,44 +109,57 @@ export async function cancelAppointment(appt: Appointment) {
   await remove(ref(rtdb, `slots/${appt.nutriUid}/${appt.date}/${appt.time}`));
 }
 
-export function listenAppointmentsByPatient(
-  patientUid: string,
-  cb: (items: Appointment[]) => void
-) {
-  const r = ref(rtdb, `appointmentsByPatient/${patientUid}`);
-  const handler = (snap: any) => {
-    const val = snap.val() || {};
-    const list: Appointment[] = Object.keys(val).map((id) => ({ id, ...val[id] }));
-    list.sort((a, b) => (a.startAt ?? 0) - (b.startAt ?? 0));
-    cb(list);
-  };
-
-  onValue(r, handler);
-  return () => off(r, "value", handler);
-}
-
 /**
- * Devuelve Set<"HH:mm"> ocupados para un nutri y fecha
+ * Escucha turnos del paciente
  */
-export async function getBookedSlotsForNutri(nutriUid: string, date: string) {
-  const s = await get(ref(rtdb, `slots/${nutriUid}/${date}`));
-  const val = s.val() || {};
-  return new Set<string>(Object.keys(val));
+export function listenAppointmentsByPatient(patientUid: string, cb: (list: Appointment[]) => void) {
+  const pRef = ref(rtdb, `appointmentsByPatient/${patientUid}`);
+  return onValue(pRef, (snap) => {
+    const val = snap.val() || {};
+    const list: Appointment[] = Object.keys(val).map((id) => ({
+      ...val[id],
+      id,
+      startAt: Number(val[id]?.startAt ?? 0),
+      endAt: Number(val[id]?.endAt ?? 0),
+      createdAt: Number(val[id]?.createdAt ?? 0),
+    }));
+    list.sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0));
+    cb(list);
+  });
 }
 
 /**
- * Listener realtime para slots ocupados (mejor UX)
+ * Escucha turnos del nutri (esto te evita el error de "is not a function")
+ */
+export function listenAppointmentsByNutri(nutriUid: string, cb: (list: Appointment[]) => void) {
+  const nRef = ref(rtdb, `appointmentsByNutri/${nutriUid}`);
+  return onValue(nRef, (snap) => {
+    const val = snap.val() || {};
+    const list: Appointment[] = Object.keys(val).map((id) => ({
+      ...val[id],
+      id,
+      startAt: Number(val[id]?.startAt ?? 0),
+      endAt: Number(val[id]?.endAt ?? 0),
+      createdAt: Number(val[id]?.createdAt ?? 0),
+    }));
+    list.sort((a, b) => (b.startAt ?? 0) - (a.startAt ?? 0));
+    cb(list);
+  });
+}
+
+/**
+ * Escucha slots ocupados para un nutri y una fecha
+ * Devuelve Set con HH:mm ocupados
  */
 export function listenBookedSlotsForNutri(
   nutriUid: string,
-  date: string,
+  dateYYYYMMDD: string,
   cb: (set: Set<string>) => void
 ) {
-  const r = ref(rtdb, `slots/${nutriUid}/${date}`);
-  const handler = (snap: any) => {
+  const sRef = ref(rtdb, `slots/${nutriUid}/${dateYYYYMMDD}`);
+  return onValue(sRef, (snap) => {
     const val = snap.val() || {};
-    cb(new Set<string>(Object.keys(val)));
-  };
-  onValue(r, handler);
-  return () => off(r, "value", handler);
+    const set = new Set<string>(Object.keys(val));
+    cb(set);
+  });
 }

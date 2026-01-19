@@ -1,186 +1,140 @@
-import { ref, onValue, off } from "firebase/database";
+import { onValue, ref } from "firebase/database";
 import { rtdb } from "./firebase";
 
-export type BreakItem = { start: string; end: string };
+export type NutriDayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
-export type AvailabilityDay = {
-  start: string; // "10:00"
-  end: string;   // "14:00"
-  breaks?: BreakItem[] | Record<string, BreakItem> | string | null;
+export type NutriAvailabilityDay = {
+  enabled?: boolean;              // default true
+  start?: string;                 // "09:00"
+  end?: string;                   // "18:00"
+  slotMinutes?: number;           // default 30
+  breaks?: Array<{ start: string; end: string }>; // opcional
 };
 
 export type Nutritionist = {
   uid: string;
+  role?: string;
   name: string;
   email: string;
-  role: "nutricionista";
   photoURL?: string;
-  availability?: {
-    days?: Record<string, AvailabilityDay | string>;
-  };
+
+  // availability puede venir bien o “sucia”. La normalizamos.
+  availability?: Partial<Record<NutriDayKey, NutriAvailabilityDay>>;
+
+  // Campos opcionales
+  createdAt?: number;
 };
 
-function toMin(hhmm: string) {
-  const [h, m] = hhmm.split(":").map(Number);
-  return h * 60 + m;
-}
-function toHHmm(min: number) {
-  const h = String(Math.floor(min / 60)).padStart(2, "0");
-  const m = String(min % 60).padStart(2, "0");
-  return `${h}:${m}`;
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
 }
 
-function isHHmm(s: any) {
-  return typeof s === "string" && /^[0-2]\d:\d\d$/.test(s);
+function toMin(hhmm: string) {
+  const [h, m] = hhmm.split(":").map((x) => Number(x));
+  return h * 60 + m;
+}
+
+function fromMin(min: number) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${pad2(h)}:${pad2(m)}`;
 }
 
 /**
- * Convierte breaks a array pase lo que pase:
- * - array -> array
- * - objeto -> Object.values(obj)
- * - string -> intenta parsear {start,end} o "start:.. end:.."
- * - null/undefined -> []
+ * Normaliza breaks para que SIEMPRE sea array.
+ * A veces en RTDB se guardan como objeto:
+ * breaks: { a:{start,end}, b:{start,end} }
  */
-function normalizeBreaks(breaks: any): BreakItem[] {
-  if (!breaks) return [];
-
-  // Array ✅
-  if (Array.isArray(breaks)) {
-    return breaks
-      .map((b) => ({
-        start: String(b?.start || ""),
-        end: String(b?.end || ""),
-      }))
-      .filter((b) => isHHmm(b.start) && isHHmm(b.end));
+function normalizeBreaks(raw: any): Array<{ start: string; end: string }> {
+  if (Array.isArray(raw)) {
+    return raw
+      .filter(Boolean)
+      .map((b) => ({ start: String(b.start || ""), end: String(b.end || "") }))
+      .filter((b) => b.start.includes(":") && b.end.includes(":"));
   }
 
-  // Object ✅  (Firebase muchas veces guarda arrays como objetos)
-  if (typeof breaks === "object") {
-    return Object.values(breaks as Record<string, any>)
-      .map((b) => ({
-        start: String((b as any)?.start || ""),
-        end: String((b as any)?.end || ""),
-      }))
-      .filter((b) => isHHmm(b.start) && isHHmm(b.end));
-  }
-
-  // String ✅ (si lo guardaste como texto)
-  if (typeof breaks === "string") {
-    // soporta: "{start:12:00,end:12:30}" o "start:12:00, end:12:30"
-    const items: BreakItem[] = [];
-
-    // Busca múltiples { ... } dentro del string
-    const blocks = breaks.match(/\{[^}]*\}/g);
-    if (blocks?.length) {
-      for (const blk of blocks) {
-        const bs = (blk.match(/start\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-        const be = (blk.match(/end\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-        if (bs && be) items.push({ start: bs, end: be });
-      }
-      return items;
-    }
-
-    // Si es uno solo sin llaves
-    const bs = (breaks.match(/start\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-    const be = (breaks.match(/end\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-    if (bs && be) return [{ start: bs, end: be }];
-
-    return [];
+  if (raw && typeof raw === "object") {
+    return Object.values(raw)
+      .filter(Boolean)
+      .map((b: any) => ({ start: String(b.start || ""), end: String(b.end || "") }))
+      .filter((b) => b.start.includes(":") && b.end.includes(":"));
   }
 
   return [];
 }
 
-function parseDayString(s: string): AvailabilityDay | null {
-  try {
-    const start = (s.match(/start\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-    const end = (s.match(/end\s*:\s*([0-2]\d:\d\d)/i) || [])[1];
-    if (!start || !end) return null;
+function normalizeDay(raw: any): NutriAvailabilityDay {
+  const enabled = raw?.enabled ?? true;
+  const start = String(raw?.start ?? "09:00");
+  const end = String(raw?.end ?? "18:00");
+  const slotMinutes = Number(raw?.slotMinutes ?? 30) || 30;
+  const breaks = normalizeBreaks(raw?.breaks);
 
-    // breaks puede venir dentro del string
-    let breaksPart = "";
-    const m = s.match(/breaks\s*:\s*(\[.*\]|\{.*\}|.*)$/i);
-    if (m?.[1]) breaksPart = m[1];
-
-    const breaks = normalizeBreaks(breaksPart);
-    return { start, end, breaks };
-  } catch {
-    return null;
-  }
+  return { enabled, start, end, slotMinutes, breaks };
 }
 
-function normalizeDay(day: AvailabilityDay | string | undefined): AvailabilityDay | null {
-  if (!day) return null;
-
-  if (typeof day === "string") {
-    return parseDayString(day);
+function isInBreak(t: string, breaks: Array<{ start: string; end: string }>) {
+  const m = toMin(t);
+  for (const b of breaks) {
+    const bs = toMin(b.start);
+    const be = toMin(b.end);
+    if (m >= bs && m < be) return true;
   }
-
-  if (typeof day === "object" && isHHmm((day as any).start) && isHHmm((day as any).end)) {
-    return {
-      start: String((day as any).start),
-      end: String((day as any).end),
-      breaks: normalizeBreaks((day as any).breaks),
-    };
-  }
-
-  return null;
+  return false;
 }
 
 /**
- * Genera slots cada 30 minutos dentro de start-end, excluyendo breaks.
+ * Genera slots para un nutri y un día (mon/tue...).
+ * - respeta enabled
+ * - respeta breaks
+ * - respeta slotMinutes
  */
-export function buildSlotsFromAvailability(day: AvailabilityDay, stepMin = 30) {
-  const startM = toMin(day.start);
-  const endM = toMin(day.end);
+export function getSlotsForNutriOnDay(nutri: Nutritionist, day: NutriDayKey): string[] {
+  const rawDay = nutri?.availability?.[day];
+  const cfg = normalizeDay(rawDay);
 
-  const breaksArr = normalizeBreaks(day.breaks).map((b) => ({
-    s: toMin(b.start),
-    e: toMin(b.end),
-  }));
+  if (!cfg.enabled) return [];
 
-  const slots: string[] = [];
-  for (let t = startM; t + stepMin <= endM; t += stepMin) {
-    const tEnd = t + stepMin;
+  const startStr = cfg.start ?? "09:00";
+  const endStr = cfg.end ?? "18:00";
 
-    const inBreak = breaksArr.some((b) => t < b.e && tEnd > b.s);
-    if (!inBreak) slots.push(toHHmm(t));
+  const startMin = toMin(startStr);
+  const endMin = toMin(endStr);
+
+
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return [];
+
+  const step = cfg.slotMinutes ?? 30;
+  const out: string[] = [];
+
+  for (let m = startMin; m + step <= endMin; m += step) {
+    const t = fromMin(m);
+    if (!isInBreak(t, cfg.breaks || [])) out.push(t);
   }
-
-  return slots;
+  return out;
 }
 
-export function listenNutritionists(cb: (items: Nutritionist[]) => void) {
-  const r = ref(rtdb, "users");
-  const handler = (snap: any) => {
+/**
+ * Lista nutricionistas: users donde role === "nutricionista"
+ */
+export function listenNutritionists(cb: (list: Nutritionist[]) => void) {
+  const usersRef = ref(rtdb, "users");
+  return onValue(usersRef, (snap) => {
     const val = snap.val() || {};
-
     const list: Nutritionist[] = Object.keys(val)
-      .map((uid) => ({ uid, ...val[uid] }))
-      .filter((u: any) => String(u.role || "").toLowerCase() === "nutricionista")
-      .map((u: any) => ({
-        uid: u.uid,
-        name: u.name || "Nutricionista",
-        email: u.email || "",
-        role: "nutricionista" as const,
-        photoURL: u.photoURL || "",
-        availability: u.availability || {},
-      }));
+      .map((uid) => ({
+        uid,
+        role: val[uid]?.role,
+        name: String(val[uid]?.name || "Nutricionista"),
+        email: String(val[uid]?.email || ""),
+        photoURL: val[uid]?.photoURL ? String(val[uid]?.photoURL) : undefined,
+        availability: val[uid]?.availability || undefined,
+        createdAt: val[uid]?.createdAt ? Number(val[uid]?.createdAt) : undefined,
+      }))
+      .filter((u) => (u.role || "").toLowerCase() === "nutricionista");
 
+    // orden
+    list.sort((a, b) => a.name.localeCompare(b.name));
     cb(list);
-  };
-
-  onValue(r, handler);
-  return () => off(r, "value", handler);
-}
-
-/**
- * Devuelve slots para un día de semana (mon/tue/...) si hay disponibilidad.
- * Si no hay availability bien cargada => []
- */
-export function getSlotsForNutriOnDay(n: Nutritionist, dowKey: string) {
-  const dayRaw = n.availability?.days?.[dowKey];
-  const day = normalizeDay(dayRaw as any);
-  if (!day) return [];
-  return buildSlotsFromAvailability(day, 30);
+  });
 }

@@ -1,18 +1,22 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
+import { useEffect } from "react";
+import { Platform } from "react-native";
+import { Stack } from "expo-router";
+import "react-native-reanimated";
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import * as Font from "expo-font";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 
 export const unstable_settings = {
-  anchor: '(tabs)',
+  anchor: "(tabs)",
 };
 
 export default function RootLayout() {
-  return (
-    <Stack screenOptions={{ headerShown: false }}>
-      {/* Deja que expo-router renderice rutas sin header */}
-    </Stack>
-  );
+  useEffect(() => {
+    // ✅ Esto arregla los iconos "cuadrados" en Firebase Hosting / Web
+    if (Platform.OS === "web") {
+      Font.loadAsync(MaterialCommunityIcons.font).catch(() => {});
+    }
+  }, []);
+
+  return <Stack screenOptions={{ headerShown: false }} />;
 }
