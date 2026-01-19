@@ -1,16 +1,10 @@
-// app/_layout.tsx
-import React, { useEffect } from "react";
 import { Stack } from "expo-router";
-import { Provider as PaperProvider } from "react-native-paper";
-import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
+import { useEffect } from "react";
+import * as SplashScreen from "expo-splash-screen";
 import { useFonts } from "expo-font";
-import { SplashScreen } from "expo-router";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 
-SplashScreen.preventAutoHideAsync();
-
-export const unstable_settings = {
-  anchor: "(tabs)",
-};
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export default function RootLayout() {
   const [loaded] = useFonts({
@@ -18,18 +12,12 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
-    if (loaded) SplashScreen.hideAsync();
+    if (loaded) {
+      SplashScreen.hideAsync().catch(() => {});
+    }
   }, [loaded]);
 
   if (!loaded) return null;
 
-  return (
-    <PaperProvider
-      settings={{
-        icon: (props) => <MaterialCommunityIcons {...props} />,
-      }}
-    >
-      <Stack screenOptions={{ headerShown: false }} />
-    </PaperProvider>
-  );
+  return <Stack screenOptions={{ headerShown: false }} />;
 }
