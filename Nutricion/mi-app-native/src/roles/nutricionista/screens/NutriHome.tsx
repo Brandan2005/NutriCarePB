@@ -16,16 +16,17 @@ import {
 } from "react-native-paper";
 import { router } from "expo-router";
 import { signOut } from "firebase/auth";
-import { onValue, push, ref, set, update } from "firebase/database";
+import { onValue, ref, update } from "firebase/database";
 import { LineChart } from "react-native-gifted-charts";
 
 import { auth, rtdb } from "../../../shared/services/firebase";
 import {
   Appointment,
+  AppointmentStatus,
   cancelAppointment,
   listenAppointmentsByNutri,
-  setAppointmentStatus,
 } from "../../../shared/services/appointments";
+import { AppIcon } from "../../../shared/components/AppIcon";
 
 type UserRole = "paciente" | "nutricionista";
 
@@ -40,14 +41,24 @@ type UserDoc = {
 };
 
 type WeightItem = { id: string; value: number; date: string };
+
+// ✅ NutriHome lee formato plano (ratingGeneral + q1..q5)
+// y también es compatible si viene experience (fallback)
 type MealItem = {
   id: string;
   date: string;
   mealType: string;
   text: string;
-  rating: number;
-  // si después agregás preguntas extra, quedan guardadas acá:
-  q1?: number; q2?: number; q3?: number; q4?: number; q5?: number;
+
+  ratingGeneral?: number;
+
+  q1?: number; // saciedad
+  q2?: number; // energia
+  q3?: number; // digestion
+  q4?: number; // ansiedad
+  q5?: number; // cumplimiento
+
+  createdAt?: number;
 };
 
 const { width } = Dimensions.get("window");
@@ -67,11 +78,17 @@ function statusLabel(s: Appointment["status"]) {
 }
 
 function statusColors(s: Appointment["status"]) {
-  // devuelve { bg, text, border }
   if (s === "asistio") return { bg: "#ECFDF5", text: "#065F46", border: "#A7F3D0" };
   if (s === "no_asistio") return { bg: "#FEF2F2", text: "#991B1B", border: "#FECACA" };
   if (s === "cancelado") return { bg: "#F3F4F6", text: "#374151", border: "#E5E7EB" };
-  return { bg: "#EEF2FF", text: "#3730A3", border: "#C7D2FE" }; // pendiente
+  return { bg: "#EEF2FF", text: "#3730A3", border: "#C7D2FE" };
+}
+
+function toNum(v: any, fallback: number | undefined = 0): number | undefined {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return n;
 }
 
 export default function NutriHome({ email }: { email: string }) {
@@ -150,13 +167,11 @@ export default function NutriHome({ email }: { email: string }) {
   const [query, setQuery] = useState("");
   const [selectedPatient, setSelectedPatient] = useState<UserDoc | null>(null);
 
-  // Patient detail data
+  // Patient detail data (solo lectura)
   const [pWeights, setPWeights] = useState<WeightItem[]>([]);
   const [pMeals, setPMeals] = useState<MealItem[]>([]);
-  const [openAddWeight, setOpenAddWeight] = useState(false);
-  const [newWeight, setNewWeight] = useState("");
-  const [newWeightDate, setNewWeightDate] = useState("");
 
+  // ====== LOAD BASE DATA ======
   useEffect(() => {
     if (!user) return;
 
@@ -171,7 +186,7 @@ export default function NutriHome({ email }: { email: string }) {
     // 2) Appointments by nutri
     const unsubAppts = listenAppointmentsByNutri(user.uid, (list) => setAppointments(list));
 
-    // 3) Patients list (simple: bajamos users y filtramos role === "paciente")
+    // 3) Patients list
     const usersRef = ref(rtdb, "users");
     const unsubUsers = onValue(usersRef, (snap) => {
       const val = snap.val() || {};
@@ -194,7 +209,7 @@ export default function NutriHome({ email }: { email: string }) {
     };
   }, [user]);
 
-  // When open patient: load weights/meals for that patient
+  // ====== LOAD SELECTED PATIENT DATA (solo ver) ======
   useEffect(() => {
     if (!selectedPatient) return;
 
@@ -211,25 +226,58 @@ export default function NutriHome({ email }: { email: string }) {
         value: Number(val[id]?.value ?? 0),
         date: String(val[id]?.date ?? ""),
       }));
-      list.sort((a, b) => (a.date < b.date ? -1 : 1));
+      list.sort((a, b) => (a.date < b.date ? -1 : 1)); // viejo -> nuevo para gráfico
       setPWeights(list);
     });
 
+    // ✅ Meals: compatible con ambos formatos
     const unsubM = onValue(mRef, (snap) => {
       const val = snap.val() || {};
-      const list: MealItem[] = Object.keys(val).map((id) => ({
-        id,
-        date: String(val[id]?.date ?? ""),
-        mealType: String(val[id]?.mealType ?? ""),
-        text: String(val[id]?.text ?? ""),
-        rating: Number(val[id]?.rating ?? 0),
-        q1: val[id]?.q1 ?? undefined,
-        q2: val[id]?.q2 ?? undefined,
-        q3: val[id]?.q3 ?? undefined,
-        q4: val[id]?.q4 ?? undefined,
-        q5: val[id]?.q5 ?? undefined,
-      }));
-      list.sort((a, b) => (a.date > b.date ? -1 : 1));
+      const list: MealItem[] = Object.keys(val).map((id) => {
+        const it = val[id] || {};
+        const exp = it.experience || {};
+
+        // Si viene plano (desde NutriHome viejo / migración)
+        // ratingGeneral: number
+        // q1..q5: number
+        // Si viene nested (desde PacienteHome viejo): experience.general, experience.saciedad...
+        const ratingGeneral =
+          typeof it.ratingGeneral === "number"
+            ? it.ratingGeneral
+            : typeof it.rating === "number"
+            ? it.rating
+            : toNum(exp.general, 0);
+
+        const q1 = typeof it.q1 === "number" ? it.q1 : toNum(exp.saciedad, undefined);
+        const q2 = typeof it.q2 === "number" ? it.q2 : toNum(exp.energia, undefined);
+        const q3 = typeof it.q3 === "number" ? it.q3 : toNum(exp.digestion, undefined);
+        const q4 = typeof it.q4 === "number" ? it.q4 : toNum(exp.ansiedad, undefined);
+        const q5 = typeof it.q5 === "number" ? it.q5 : toNum(exp.cumplimiento, undefined);
+
+        return {
+          id,
+          date: String(it.date ?? ""),
+          mealType: String(it.mealType ?? ""),
+          text: String(it.text ?? ""),
+          ratingGeneral: typeof ratingGeneral === "number" ? ratingGeneral : 0,
+          q1,
+          q2,
+          q3,
+          q4,
+          q5,
+          createdAt: typeof it.createdAt === "number" ? it.createdAt : undefined,
+        };
+      });
+
+      // ✅ ordenar más nuevas arriba (si hay createdAt lo usamos, si no por date)
+      list.sort((a, b) => {
+        const aa = a.createdAt ?? 0;
+        const bb = b.createdAt ?? 0;
+        if (aa && bb) return bb - aa;
+        if (a.date === b.date) return 0;
+        return a.date > b.date ? -1 : 1;
+      });
+
       setPMeals(list);
     });
 
@@ -281,9 +329,15 @@ export default function NutriHome({ email }: { email: string }) {
       .slice(0, 50);
   }, [patients, query]);
 
-  async function markAs(appt: Appointment, status: Appointment["status"]) {
+  // ✅ Reemplazo de setAppointmentStatus (que en tu proyecto NO existe):
+  async function setStatus(appt: Appointment, status: AppointmentStatus) {
     try {
-      await setAppointmentStatus(appt, status);
+      const updates: Record<string, any> = {};
+      updates[`appointments/${appt.id}/status`] = status;
+      updates[`appointmentsByNutri/${appt.nutriUid}/${appt.id}/status`] = status;
+      updates[`appointmentsByPatient/${appt.patientUid}/${appt.id}/status`] = status;
+
+      await update(ref(rtdb), updates);
       toast(`Turno: ${statusLabel(status)} ✅`);
     } catch (e: any) {
       toast(e?.message ? String(e.message) : "Error actualizando turno.");
@@ -293,46 +347,9 @@ export default function NutriHome({ email }: { email: string }) {
   async function onCancel(appt: Appointment) {
     try {
       await cancelAppointment(appt);
-      toast("Turno cancelado y horario liberado 🗑️");
+      toast("Turno cancelado 🗑️");
     } catch (e: any) {
       toast(e?.message ? String(e.message) : "Error cancelando turno.");
-    }
-  }
-
-  function todayISO() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-  }
-
-  async function addWeightToPatient() {
-    if (!selectedPatient) return;
-
-    const value = Number(String(newWeight).replace(",", "."));
-    if (!value || value <= 0) {
-      toast("Ingresá un peso válido.");
-      return;
-    }
-
-    const date = (newWeightDate || todayISO()).trim();
-    if (!date || date.length !== 10) {
-      toast("Fecha inválida. Usá YYYY-MM-DD.");
-      return;
-    }
-
-    try {
-      const listRef = ref(rtdb, `weights/${selectedPatient.uid}`);
-      const newRef = push(listRef);
-      await set(newRef, { value, date });
-
-      setOpenAddWeight(false);
-      setNewWeight("");
-      setNewWeightDate("");
-      toast("Peso agregado al paciente ✅");
-    } catch (e: any) {
-      toast(e?.message ? String(e.message) : "Error guardando peso.");
     }
   }
 
@@ -469,7 +486,8 @@ export default function NutriHome({ email }: { email: string }) {
                                 </Text>
 
                                 <Text style={{ color: theme.muted, marginTop: 4 }}>
-                                  Paciente: <Text style={{ fontWeight: "800" }}>{a.patientName}</Text> ({a.patientEmail})
+                                  Paciente:{" "}
+                                  <Text style={{ fontWeight: "800" }}>{a.patientName}</Text> ({a.patientEmail})
                                 </Text>
 
                                 <View style={{ flexDirection: "row", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
@@ -504,20 +522,18 @@ export default function NutriHome({ email }: { email: string }) {
                                 </View>
                               </View>
 
+                              {/* Acciones: Asistió / Ausente / Cancelar (borrar) */}
                               <View style={{ alignItems: "flex-end" }}>
                                 <IconButton
-                                  icon="check-circle"
-                                  iconColor="#059669"
-                                  onPress={() => markAs(a, "asistio")}
+                                  icon={() => <AppIcon name={"check-circle" as any} size={22} color="#059669" />}
+                                  onPress={() => setStatus(a, "asistio")}
                                 />
                                 <IconButton
-                                  icon="close-circle"
-                                  iconColor="#DC2626"
-                                  onPress={() => markAs(a, "no_asistio")}
+                                  icon={() => <AppIcon name={"close-circle" as any} size={22} color="#DC2626" />}
+                                  onPress={() => setStatus(a, "no_asistio")}
                                 />
                                 <IconButton
-                                  icon="trash-can-outline"
-                                  iconColor={theme.danger}
+                                  icon={() => <AppIcon name="trash" size={22} color={theme.danger} />}
                                   onPress={() => onCancel(a)}
                                 />
                               </View>
@@ -529,7 +545,7 @@ export default function NutriHome({ email }: { email: string }) {
 
                     {apptsFiltered.length > 12 && (
                       <Text style={{ color: theme.muted, marginTop: 6 }}>
-                        Mostrando 12 de {apptsFiltered.length}. (Después hacemos paginado si querés.)
+                        Mostrando 12 de {apptsFiltered.length}.
                       </Text>
                     )}
                   </View>
@@ -565,7 +581,14 @@ export default function NutriHome({ email }: { email: string }) {
                     {patientFiltered.map((p) => (
                       <Card key={p.uid} style={styles.innerCard}>
                         <Card.Content>
-                          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              gap: 10,
+                            }}
+                          >
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flex: 1 }}>
                               {p.photoURL ? (
                                 <Avatar.Image size={40} source={{ uri: p.photoURL }} />
@@ -601,7 +624,7 @@ export default function NutriHome({ email }: { email: string }) {
           </View>
         </ScrollView>
 
-        {/* MODAL PERFIL PACIENTE */}
+        {/* MODAL PERFIL PACIENTE (SOLO VER) */}
         <Portal>
           <Modal
             visible={!!selectedPatient}
@@ -621,50 +644,24 @@ export default function NutriHome({ email }: { email: string }) {
               <ScrollView contentContainerStyle={{ paddingBottom: 12 }}>
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                   <View>
-                    <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                      Perfil del paciente
-                    </Text>
+                    <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Perfil del paciente</Text>
                     <Text style={{ color: theme.muted, marginTop: 2 }}>
                       {selectedPatient.name} · {selectedPatient.email}
                     </Text>
                   </View>
 
+                  {/* cruz estética */}
                   <IconButton icon="close" onPress={() => setSelectedPatient(null)} />
                 </View>
 
                 <Divider style={{ marginVertical: 12, ...styles.subtleDivider }} />
 
-                {/* Acciones */}
-                <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
-                  <Button
-                    mode="contained"
-                    style={styles.primaryBtn}
-                    textColor="#FFFFFF"
-                    onPress={() => setOpenAddWeight(true)}
-                  >
-                    Agregar peso
-                  </Button>
-
-                  <Button
-                    mode="outlined"
-                    style={styles.secondaryBtn}
-                    textColor={theme.violet}
-                    onPress={() => toast("Si querés, después agregamos editar datos del paciente.")}
-                  >
-                    Editar datos (opcional)
-                  </Button>
-                </View>
-
                 {/* Peso chart */}
-                <View style={{ marginTop: 14 }}>
+                <View style={{ marginTop: 2 }}>
                   <Card style={styles.sectionCard}>
                     <Card.Content>
-                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                        Progreso de peso
-                      </Text>
-                      <Text style={{ color: theme.muted, marginTop: 4 }}>
-                        Visualización rápida (kg por fecha).
-                      </Text>
+                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Progreso de peso</Text>
+                      <Text style={{ color: theme.muted, marginTop: 4 }}>Visualización rápida (kg por fecha).</Text>
 
                       <View style={{ marginTop: 12 }}>
                         {chartData.length >= 2 ? (
@@ -698,60 +695,194 @@ export default function NutriHome({ email }: { email: string }) {
                             />
                           </View>
                         ) : (
-                          <Text style={{ color: theme.muted, marginTop: 8 }}>
-                            Cargá al menos 2 pesos para ver el gráfico.
-                          </Text>
+                          <Text style={{ color: theme.muted, marginTop: 8 }}>Cargá al menos 2 pesos para ver el gráfico.</Text>
                         )}
                       </View>
                     </Card.Content>
                   </Card>
                 </View>
 
-                {/* Meals preview */}
+                {/* Meals preview (10 más recientes, de arriba a abajo) */}
                 <View style={{ marginTop: 14 }}>
                   <Card style={styles.sectionCard}>
                     <Card.Content>
-                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
-                        Comidas recientes
-                      </Text>
-                      <Text style={{ color: theme.muted, marginTop: 4 }}>
-                        Últimas cargas del paciente.
-                      </Text>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" }}>
+                        <View style={{ flex: 1, paddingRight: 10 }}>
+                          <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas recientes</Text>
+                          <Text style={{ color: theme.muted, marginTop: 4 }}>
+                            Últimas cargas del paciente (10 más recientes).
+                          </Text>
+                        </View>
+
+                        <View
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 999,
+                            borderWidth: 1,
+                            borderColor: theme.border2,
+                            backgroundColor: "#FFFFFF",
+                          }}
+                        >
+                          <Text style={{ color: theme.muted, fontWeight: "800", fontSize: 12 }}>
+                            {pMeals.length} registros
+                          </Text>
+                        </View>
+                      </View>
 
                       <Divider style={{ marginVertical: 12, ...styles.subtleDivider }} />
 
                       {pMeals.length === 0 ? (
-                        <Text style={{ color: theme.muted }}>No hay comidas registradas.</Text>
+                        <View
+                          style={{
+                            padding: 14,
+                            borderRadius: 16,
+                            borderWidth: 1,
+                            borderColor: theme.border2,
+                            backgroundColor: "#FFFFFF",
+                          }}
+                        >
+                          <Text style={{ color: theme.muted }}>El paciente todavía no registró comidas.</Text>
+                        </View>
                       ) : (
                         <View style={{ gap: 10 }}>
-                          {pMeals.slice(0, 6).map((m) => (
-                            <Card key={m.id} style={styles.innerCard}>
-                              <Card.Content>
-                                <Text style={{ fontWeight: "900", color: theme.text }}>
-                                  {formatDateLabel(m.date)} · {m.mealType} · ⭐ {m.rating}/5
-                                </Text>
-                                <Text style={{ color: theme.muted, marginTop: 6, lineHeight: 20 }}>
-                                  {m.text}
-                                </Text>
+                          {pMeals.slice(0, 10).map((m) => {
+                            const showExp = [m.q1, m.q2, m.q3, m.q4, m.q5].some((x) => typeof x === "number");
 
-                                {/* si existen preguntas extra, se muestran */}
-                                {(m.q1 || m.q2 || m.q3 || m.q4 || m.q5) ? (
-                                  <View style={{ marginTop: 10, flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-                                    {typeof m.q1 === "number" && <Chip>Q1: {m.q1}/5</Chip>}
-                                    {typeof m.q2 === "number" && <Chip>Q2: {m.q2}/5</Chip>}
-                                    {typeof m.q3 === "number" && <Chip>Q3: {m.q3}/5</Chip>}
-                                    {typeof m.q4 === "number" && <Chip>Q4: {m.q4}/5</Chip>}
-                                    {typeof m.q5 === "number" && <Chip>Q5: {m.q5}/5</Chip>}
+                            return (
+                              <Card key={m.id} style={styles.innerCard}>
+                                <Card.Content>
+                                  {/* HEADER */}
+                                  <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 10 }}>
+                                    <View style={{ flex: 1 }}>
+                                      <Text style={{ fontWeight: "900", color: theme.text }}>
+                                        {formatDateLabel(m.date)} · {m.mealType}
+                                      </Text>
+                                    </View>
+
+                                    {/* Badge */}
+                                    <View
+                                      style={{
+                                        paddingHorizontal: 10,
+                                        paddingVertical: 6,
+                                        borderRadius: 999,
+                                        backgroundColor: theme.violetSoft,
+                                        borderWidth: 1,
+                                        borderColor: theme.violetRing,
+                                      }}
+                                    >
+                                      <Text style={{ color: "#4C1D95", fontWeight: "900", fontSize: 12 }}>
+                                        {m.mealType}
+                                      </Text>
+                                    </View>
                                   </View>
-                                ) : null}
-                              </Card.Content>
-                            </Card>
-                          ))}
 
-                          {pMeals.length > 6 && (
-                            <Text style={{ color: theme.muted }}>
-                              Mostrando 6 de {pMeals.length}.
-                            </Text>
+                                  {/* Texto comida */}
+                                  <View
+                                    style={{
+                                      marginTop: 10,
+                                      padding: 12,
+                                      borderRadius: 16,
+                                      borderWidth: 1,
+                                      borderColor: theme.border2,
+                                      backgroundColor: "#FFFFFF",
+                                    }}
+                                  >
+                                    <Text style={{ color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
+                                  </View>
+
+                                  {/* General */}
+                                  <View
+                                    style={{
+                                      marginTop: 12,
+                                      flexDirection: "row",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <Text style={{ fontWeight: "900", color: theme.text }}>General</Text>
+
+                                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                                      <View style={{ flexDirection: "row", gap: 2 }}>
+                                        {[1, 2, 3, 4, 5].map((n) => (
+                                          <AppIcon
+                                            key={n}
+                                            name={n <= Number(m.ratingGeneral ?? 0) ? "star" : "star-outline"}
+                                            size={16}
+                                            color={n <= Number(m.ratingGeneral ?? 0) ? "#F59E0B" : "#D1D5DB"}
+                                          />
+                                        ))}
+                                      </View>
+                                      <Text style={{ color: theme.muted, fontWeight: "800" }}>
+                                        {Number(m.ratingGeneral ?? 0)}/5
+                                      </Text>
+                                    </View>
+                                  </View>
+
+                                  {/* Experiencia detallada */}
+                                  {showExp ? (
+                                    <View style={{ marginTop: 12 }}>
+                                      <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>
+                                        Experiencia reportada
+                                      </Text>
+
+                                      <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                                        {typeof m.q1 === "number" && (
+                                          <Chip
+                                            style={{ backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" }}
+                                            textStyle={{ color: "#3730A3", fontWeight: "800" }}
+                                          >
+                                            Saciedad: {m.q1}/5
+                                          </Chip>
+                                        )}
+                                        {typeof m.q2 === "number" && (
+                                          <Chip
+                                            style={{ backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" }}
+                                            textStyle={{ color: "#3730A3", fontWeight: "800" }}
+                                          >
+                                            Energía: {m.q2}/5
+                                          </Chip>
+                                        )}
+                                        {typeof m.q3 === "number" && (
+                                          <Chip
+                                            style={{ backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" }}
+                                            textStyle={{ color: "#3730A3", fontWeight: "800" }}
+                                          >
+                                            Digestión: {m.q3}/5
+                                          </Chip>
+                                        )}
+                                        {typeof m.q4 === "number" && (
+                                          <Chip
+                                            style={{ backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" }}
+                                            textStyle={{ color: "#3730A3", fontWeight: "800" }}
+                                          >
+                                            Ansiedad / Antojos: {m.q4}/5
+                                          </Chip>
+                                        )}
+                                        {typeof m.q5 === "number" && (
+                                          <Chip
+                                            style={{ backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE" }}
+                                            textStyle={{ color: "#3730A3", fontWeight: "800" }}
+                                          >
+                                            Cumplimiento del plan: {m.q5}/5
+                                          </Chip>
+                                        )}
+                                      </View>
+                                    </View>
+                                  ) : (
+                                    <View style={{ marginTop: 12 }}>
+                                      <Text style={{ color: theme.muted }}>
+                                        (Esta comida no tiene respuestas de experiencia guardadas.)
+                                      </Text>
+                                    </View>
+                                  )}
+                                </Card.Content>
+                              </Card>
+                            );
+                          })}
+
+                          {pMeals.length > 10 && (
+                            <Text style={{ color: theme.muted }}>Mostrando 10 de {pMeals.length}.</Text>
                           )}
                         </View>
                       )}
@@ -760,60 +891,6 @@ export default function NutriHome({ email }: { email: string }) {
                 </View>
               </ScrollView>
             )}
-          </Modal>
-        </Portal>
-
-        {/* MODAL AGREGAR PESO A PACIENTE */}
-        <Portal>
-          <Modal
-            visible={openAddWeight}
-            onDismiss={() => setOpenAddWeight(false)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 18,
-              padding: 18,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-            }}
-          >
-            <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar peso</Text>
-            <Text style={{ color: theme.muted, marginTop: 6 }}>
-              Esto se guarda en el perfil del paciente y le aparece en su gráfico.
-            </Text>
-
-            <TextInput
-              label="Peso (kg)"
-              value={newWeight}
-              onChangeText={setNewWeight}
-              keyboardType="numeric"
-              mode="outlined"
-              style={[{ marginTop: 12 }, styles.input]}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-            />
-
-            <TextInput
-              label="Fecha (YYYY-MM-DD)"
-              value={newWeightDate}
-              onChangeText={setNewWeightDate}
-              mode="outlined"
-              style={[{ marginTop: 10 }, styles.input]}
-              outlineColor={theme.border}
-              activeOutlineColor={theme.violet}
-              textColor={theme.text}
-            />
-
-            <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
-              <Button onPress={() => setOpenAddWeight(false)} textColor={theme.text}>
-                Cancelar
-              </Button>
-              <Button mode="contained" style={styles.primaryBtn} textColor="#FFFFFF" onPress={addWeightToPatient}>
-                Guardar
-              </Button>
-            </View>
           </Modal>
         </Portal>
 

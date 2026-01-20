@@ -20,7 +20,8 @@ import { signOut } from "firebase/auth";
 import { onValue, ref, push, set, update, remove } from "firebase/database";
 import { Calendar } from "react-native-calendars";
 import { LineChart } from "react-native-gifted-charts";
-
+import { AppIcon } from "../../../shared/components/AppIcon";
+import { Pressable } from "react-native";
 import { auth, rtdb } from "../../../shared/services/firebase";
 import {
   Appointment,
@@ -83,23 +84,45 @@ function StarRow({
   size?: number;
 }) {
   return (
-    <View style={{ marginTop: 10 }}>
-      <Text style={{ fontWeight: "800", marginBottom: 6 }}>{label}</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-        {[1, 2, 3, 4, 5].map((n) => (
-          <IconButton
-            key={n}
-            icon={n <= value ? "star" : "star-outline"}
-            iconColor={n <= value ? "#F59E0B" : "#D1D5DB"}
-            size={size}
-            onPress={() => onChange(n)}
-            style={{ margin: 0 }}
-          />
-        ))}
+    <View style={{ marginTop: 12 }}>
+      <Text style={{ fontWeight: "800", marginBottom: 8 }}>{label}</Text>
+
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          {[1, 2, 3, 4, 5].map((n) => {
+            const active = n <= value;
+
+            return (
+              <Pressable
+                key={n}
+                onPress={() => onChange(n)}
+                hitSlop={10}
+                style={{
+                  width: size + 12,
+                  height: size + 12,
+                  borderRadius: 999,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <AppIcon
+                  name={active ? "star" : "star-outline"}
+                  size={size}
+                  color={active ? "#F59E0B" : "#D1D5DB"}
+                />
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <Text style={{ color: "#64748B", fontWeight: "800" }}>
+          {value}/5
+        </Text>
       </View>
     </View>
   );
 }
+
 
 export default function PacienteHome({ email }: { email: string }) {
   const user = auth.currentUser;
@@ -249,29 +272,44 @@ export default function PacienteHome({ email }: { email: string }) {
         value: Number(val[id]?.value ?? 0),
         date: String(val[id]?.date ?? ""),
       }));
-      list.sort((a, b) => (a.date < b.date ? -1 : 1));
+      list.sort((a, b) => {
+  if (a.date === b.date) return 0;
+  return a.date > b.date ? -1 : 1; // más nuevo arriba
+});
       setWeights(list);
     });
 
     const unsubMeals = onValue(mealsRef, (snap) => {
-      const val = snap.val() || {};
-      const list: MealItem[] = Object.keys(val).map((id) => ({
-        id,
-        date: String(val[id]?.date ?? ""),
-        mealType: String(val[id]?.mealType ?? ""),
-        text: String(val[id]?.text ?? ""),
-        experience: {
-          general: Number(val[id]?.experience?.general ?? 4),
-          saciedad: Number(val[id]?.experience?.saciedad ?? 4),
-          energia: Number(val[id]?.experience?.energia ?? 4),
-          digestion: Number(val[id]?.experience?.digestion ?? 4),
-          ansiedad: Number(val[id]?.experience?.ansiedad ?? 4),
-          cumplimiento: Number(val[id]?.experience?.cumplimiento ?? 4),
-        },
-      }));
-      list.sort((a, b) => (a.date > b.date ? -1 : 1));
-      setMeals(list);
-    });
+  const val = snap.val() || {};
+
+  const list: MealItem[] = Object.keys(val).map((id) => {
+    const row = val[id] || {};
+
+    const general = Number(row?.experience?.general ?? row?.rating ?? 4);
+    const saciedad = Number(row?.experience?.saciedad ?? row?.q1 ?? 4);
+    const energia = Number(row?.experience?.energia ?? row?.q2 ?? 4);
+    const digestion = Number(row?.experience?.digestion ?? row?.q3 ?? 4);
+    const ansiedad = Number(row?.experience?.ansiedad ?? row?.q4 ?? 4);
+    const cumplimiento = Number(row?.experience?.cumplimiento ?? row?.q5 ?? 4);
+
+    return {
+      id,
+      date: String(row?.date ?? ""),
+      mealType: String(row?.mealType ?? ""),
+      text: String(row?.text ?? ""),
+      experience: { general, saciedad, energia, digestion, ansiedad, cumplimiento },
+    };
+  });
+
+  // ✅ más nuevo arriba (estable)
+  list.sort((a, b) => {
+    if (a.date === b.date) return 0;
+    return a.date > b.date ? -1 : 1;
+  });
+
+  setMeals(list);
+});
+
 
     return () => {
       unsubUser();
@@ -381,41 +419,90 @@ export default function PacienteHome({ email }: { email: string }) {
     toast("Peso registrado ✅");
   }
 
-  async function addMeal() {
-    if (!user) return;
-    if (!mealText.trim()) {
-      toast("Escribí qué comiste.");
-      return;
-    }
+ async function addMeal() {
+  if (!user) return;
 
-    const listRef = ref(rtdb, `meals/${user.uid}`);
-    const newRef = push(listRef);
-    await set(newRef, {
-      date: mealDate,
-      mealType,
-      text: mealText.trim(),
-      experience: mealExp,
-    });
-
-    setOpenMealModal(false);
-    setMealText("");
-    setMealType("Desayuno");
-    setMealDate(todayISO());
-    setMealExp(emptyExp);
-    toast("Comida guardada ✅");
+  if (!mealText.trim()) {
+    toast("Escribí qué comiste.");
+    return;
   }
 
-  async function saveMealEdit() {
-    if (!user || !editingMeal) return;
-    await update(ref(rtdb, `meals/${user.uid}/${editingMeal.id}`), {
-      date: editingMeal.date,
-      mealType: editingMeal.mealType,
-      text: editingMeal.text,
-      experience: editingMeal.experience,
-    });
-    setEditingMeal(null);
-    toast("Comida actualizada ✅");
-  }
+  const createdAt = Date.now();
+
+  // Normalizamos por las dudas (evita strings raros)
+  const exp: MealExperience = {
+    general: Number(mealExp.general ?? 0),
+    saciedad: Number(mealExp.saciedad ?? 0),
+    energia: Number(mealExp.energia ?? 0),
+    digestion: Number(mealExp.digestion ?? 0),
+    ansiedad: Number(mealExp.ansiedad ?? 0),
+    cumplimiento: Number(mealExp.cumplimiento ?? 0),
+  };
+
+  const listRef = ref(rtdb, `meals/${user.uid}`);
+  const newRef = push(listRef);
+
+  await set(newRef, {
+    date: mealDate,
+    mealType,
+    text: mealText.trim(),
+
+    // ✅ COMO TU FOTO CORRECTA (campos planos)
+    createdAt,
+    ratingGeneral: exp.general,
+    q1: exp.saciedad,
+    q2: exp.energia,
+    q3: exp.digestion,
+    q4: exp.ansiedad,
+    q5: exp.cumplimiento,
+
+    // ✅ opcional: si querés mantenerlo por compatibilidad, dejalo
+    // (si no lo querés, borrá estas 2 líneas)
+    experience: exp,
+  });
+
+  setOpenMealModal(false);
+  setMealText("");
+  setMealType("Desayuno");
+  setMealDate(todayISO());
+  setMealExp(emptyExp);
+
+  toast("Comida guardada ✅");
+}
+
+async function saveMealEdit() {
+  if (!user || !editingMeal) return;
+
+  const exp: MealExperience = {
+    general: Number(editingMeal.experience?.general ?? 0),
+    saciedad: Number(editingMeal.experience?.saciedad ?? 0),
+    energia: Number(editingMeal.experience?.energia ?? 0),
+    digestion: Number(editingMeal.experience?.digestion ?? 0),
+    ansiedad: Number(editingMeal.experience?.ansiedad ?? 0),
+    cumplimiento: Number(editingMeal.experience?.cumplimiento ?? 0),
+  };
+
+  await update(ref(rtdb, `meals/${user.uid}/${editingMeal.id}`), {
+    date: editingMeal.date,
+    mealType: editingMeal.mealType,
+    text: editingMeal.text,
+
+    // ✅ mantener consistente con la DB “correcta”
+    ratingGeneral: exp.general,
+    q1: exp.saciedad,
+    q2: exp.energia,
+    q3: exp.digestion,
+    q4: exp.ansiedad,
+    q5: exp.cumplimiento,
+
+    // ✅ opcional: mantener experience también
+    experience: exp,
+  });
+
+  setEditingMeal(null);
+  toast("Comida actualizada ✅");
+}
+
 
   async function deleteMeal(id: string) {
     if (!user) return;
@@ -667,16 +754,33 @@ export default function PacienteHome({ email }: { email: string }) {
                 </Card.Content>
               </Card>
 
-              {/* COMIDAS */}
+                            {/* COMIDAS */}
               <Card style={styles.sectionCard}>
                 <Card.Content>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 10,
+                    }}
+                  >
                     <View>
-                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Comidas</Text>
-                      <Text style={{ color: theme.muted, marginTop: 4 }}>Historial por fecha + experiencia ⭐</Text>
+                      <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
+                        Comidas
+                      </Text>
+                      <Text style={{ color: theme.muted, marginTop: 4 }}>
+                        Historial por fecha + experiencia ⭐
+                      </Text>
                     </View>
 
-                    <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={() => setOpenMealModal(true)}>
+                    <Button
+                      mode="contained"
+                      style={styles.primaryBtn}
+                      labelStyle={styles.primaryBtnText}
+                      onPress={() => setOpenMealModal(true)}
+                    >
                       Agregar
                     </Button>
                   </View>
@@ -686,40 +790,150 @@ export default function PacienteHome({ email }: { email: string }) {
                   <View style={{ maxHeight: isWide ? 420 : 320 }}>
                     <ScrollView>
                       {meals.length === 0 ? (
-                        <Text style={{ color: theme.muted }}>Todavía no cargaste comidas. Tocá “Agregar”.</Text>
+                        <Text style={{ color: theme.muted }}>
+                          Todavía no cargaste comidas. Tocá “Agregar”.
+                        </Text>
                       ) : (
                         <View style={{ gap: 10, paddingBottom: 4 }}>
                           {meals.map((m) => (
                             <Card key={m.id} style={styles.innerCard}>
                               <Card.Content>
-                                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
-                                  <View style={{ flex: 1, paddingRight: 8 }}>
+                                <View
+                                  style={{
+                                    flexDirection: "row",
+                                    justifyContent: "space-between",
+                                    alignItems: "flex-start",
+                                    gap: 12,
+                                  }}
+                                >
+                                  {/* INFO */}
+                                  <View style={{ flex: 1 }}>
                                     <Text style={{ fontWeight: "900", color: theme.text }}>
                                       {formatDateLabel(m.date)} · {m.mealType}
                                     </Text>
-                                    <Text style={{ marginTop: 8, color: theme.muted, lineHeight: 20 }}>{m.text}</Text>
 
-                                    <View style={{ marginTop: 10, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
-                                      <Text style={{ fontWeight: "900", color: theme.text, marginBottom: 6 }}>Experiencia</Text>
+                                    <Text
+                                      style={{
+                                        marginTop: 8,
+                                        color: theme.muted,
+                                        lineHeight: 20,
+                                      }}
+                                    >
+                                      {m.text}
+                                    </Text>
 
-                                      {[
+                                    {/* EXPERIENCIA */}
+                                    <View
+                                      style={{
+                                        marginTop: 10,
+                                        padding: 12,
+                                        borderRadius: 16,
+                                        borderWidth: 1,
+                                        borderColor: theme.border2,
+                                        backgroundColor: "#FFFFFF",
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          fontWeight: "900",
+                                          color: theme.text,
+                                          marginBottom: 8,
+                                        }}
+                                      >
+                                        Experiencia
+                                      </Text>
+
+                                      {([
                                         ["General", m.experience.general],
                                         ["Saciedad", m.experience.saciedad],
                                         ["Energía", m.experience.energia],
                                         ["Digestión", m.experience.digestion],
                                         ["Ansiedad / Antojos", m.experience.ansiedad],
                                         ["Cumplimiento del plan", m.experience.cumplimiento],
-                                      ].map(([label, val]) => (
-                                        <Text key={String(label)} style={{ color: theme.muted, marginTop: 4 }}>
-                                          ⭐ {label}: <Text style={{ fontWeight: "900", color: theme.text }}>{val as number}/5</Text>
-                                        </Text>
+                                      ] as const).map(([label, val]) => (
+                                        <View
+                                          key={label}
+                                          style={{
+                                            flexDirection: "row",
+                                            alignItems: "center",
+                                            gap: 8,
+                                            marginTop: 6,
+                                          }}
+                                        >
+                                          {/* estrellas */}
+                                          <View style={{ flexDirection: "row", gap: 2 }}>
+                                            {[1, 2, 3, 4, 5].map((n) => (
+                                              <AppIcon
+                                                key={n}
+                                                name={n <= val ? "star" : "star-outline"}
+                                                size={14}
+                                                color={n <= val ? "#F59E0B" : "#D1D5DB"}
+                                              />
+                                            ))}
+                                          </View>
+
+                                          <Text style={{ color: theme.muted }}>
+                                            {label}:{" "}
+                                            <Text
+                                              style={{
+                                                fontWeight: "900",
+                                                color: theme.text,
+                                              }}
+                                            >
+                                              {val}/5
+                                            </Text>
+                                          </Text>
+                                        </View>
                                       ))}
                                     </View>
                                   </View>
 
-                                  <View style={{ flexDirection: "row" }}>
-                                    <IconButton icon="pencil" iconColor={theme.violet} onPress={() => setEditingMeal({ ...m })} />
-                                    <IconButton icon="trash-can-outline" iconColor={theme.danger} onPress={() => deleteMeal(m.id)} />
+                                  {/* ACCIONES */}
+                                  <View
+                                    style={{
+                                      flexDirection: "row",
+                                      gap: 12,
+                                      alignItems: "center",
+                                      paddingTop: 4,
+                                    }}
+                                  >
+                                    <Button
+                                      mode="text"
+                                      compact
+                                      onPress={() => setEditingMeal({ ...m })}
+                                      style={{ minWidth: 36, paddingHorizontal: 0 }}
+                                      contentStyle={{
+                                        width: 36,
+                                        height: 36,
+                                        justifyContent: "center",
+                                        alignItems: "center",
+                                      }}
+                                    >
+                                      <AppIcon
+                                        name="pencil"
+                                        size={20}
+                                        color={theme.violet}
+                                      />
+                                    </Button>
+
+                                    <Button
+                                      mode="text"
+                                      compact
+                                      onPress={() => deleteMeal(m.id)}
+                                      style={{ minWidth: 36, paddingHorizontal: 0 }}
+                                      contentStyle={{
+                                        width: 36,
+                                        height: 36,
+                                        justifyContent: "center",
+                                        alignItems: "center",
+                                      }}
+                                    >
+                                      <AppIcon
+                                        name="trash"
+                                        size={20}
+                                        color={theme.danger}
+                                      />
+                                    </Button>
                                   </View>
                                 </View>
                               </Card.Content>
@@ -731,6 +945,8 @@ export default function PacienteHome({ email }: { email: string }) {
                   </View>
                 </Card.Content>
               </Card>
+
+
             </View>
 
             {/* RIGHT */}
@@ -988,152 +1204,302 @@ export default function PacienteHome({ email }: { email: string }) {
 
         {/* MODAL COMIDA */}
         <Portal>
-          <Modal
-            visible={openMealModal}
-            onDismiss={() => setOpenMealModal(false)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 14,
-              padding: 16,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-              maxHeight: Platform.OS === "web" ? 560 : 640,
-            }}
-          >
-            <ScrollView>
-              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Agregar comida</Text>
-              <Text style={{ color: theme.muted, marginTop: 6 }}>Fecha, tipo de comida y experiencia.</Text>
+            <Modal
+              visible={openMealModal}
+              onDismiss={() => setOpenMealModal(false)}
+              contentContainerStyle={{
+                backgroundColor: "#FFFFFF",
+                margin: 14,
+                padding: 16,
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: theme.border2,
+                ...theme.shadow,
+                maxHeight: Platform.OS === "web" ? 560 : 640,
+              }}
+            >
+              <ScrollView>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
+                  Agregar comida
+                </Text>
+                <Text style={{ color: theme.muted, marginTop: 6 }}>
+                  Fecha, tipo de comida y experiencia.
+                </Text>
 
-              <TextInput
-                label="Fecha (YYYY-MM-DD)"
-                value={mealDate}
-                onChangeText={setMealDate}
-                style={[{ marginTop: 12 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+                <TextInput
+                  label="Fecha (YYYY-MM-DD)"
+                  value={mealDate}
+                  onChangeText={setMealDate}
+                  style={[{ marginTop: 12 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-              <TextInput
-                label="Tipo (Desayuno/Almuerzo/Merienda/Cena)"
-                value={mealType}
-                onChangeText={setMealType}
-                style={[{ marginTop: 10 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+                <TextInput
+                  label="Tipo (Desayuno/Almuerzo/Merienda/Cena)"
+                  value={mealType}
+                  onChangeText={setMealType}
+                  style={[{ marginTop: 10 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-              <TextInput
-                label="¿Qué comiste?"
-                value={mealText}
-                onChangeText={setMealText}
-                multiline
-                style={[{ marginTop: 10 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+                <TextInput
+                  label="¿Qué comiste?"
+                  value={mealText}
+                  onChangeText={setMealText}
+                  multiline
+                  style={[{ marginTop: 10 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-              <View style={{ marginTop: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
-                <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia (⭐)</Text>
+                <View
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    borderRadius: 16,
+                    borderWidth: 1,
+                    borderColor: theme.border2,
+                    backgroundColor: "#FFFFFF",
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: theme.text }}>
+                    Experiencia (⭐)
+                  </Text>
 
-                <StarRow label="General" value={mealExp.general} onChange={(v) => setMealExp((p) => ({ ...p, general: v }))} />
-                <StarRow label="Saciedad" value={mealExp.saciedad} onChange={(v) => setMealExp((p) => ({ ...p, saciedad: v }))} />
-                <StarRow label="Energía" value={mealExp.energia} onChange={(v) => setMealExp((p) => ({ ...p, energia: v }))} />
-                <StarRow label="Digestión" value={mealExp.digestion} onChange={(v) => setMealExp((p) => ({ ...p, digestion: v }))} />
-                <StarRow label="Ansiedad / Antojos" value={mealExp.ansiedad} onChange={(v) => setMealExp((p) => ({ ...p, ansiedad: v }))} />
-                <StarRow label="Cumplimiento del plan" value={mealExp.cumplimiento} onChange={(v) => setMealExp((p) => ({ ...p, cumplimiento: v }))} />
-              </View>
+                  <StarRow
+                    label="General"
+                    value={mealExp.general}
+                    onChange={(v) => setMealExp((p) => ({ ...p, general: v }))}
+                  />
+                  <StarRow
+                    label="Saciedad"
+                    value={mealExp.saciedad}
+                    onChange={(v) => setMealExp((p) => ({ ...p, saciedad: v }))}
+                  />
+                  <StarRow
+                    label="Energía"
+                    value={mealExp.energia}
+                    onChange={(v) => setMealExp((p) => ({ ...p, energia: v }))}
+                  />
+                  <StarRow
+                    label="Digestión"
+                    value={mealExp.digestion}
+                    onChange={(v) => setMealExp((p) => ({ ...p, digestion: v }))}
+                  />
+                  <StarRow
+                    label="Ansiedad / Antojos"
+                    value={mealExp.ansiedad}
+                    onChange={(v) => setMealExp((p) => ({ ...p, ansiedad: v }))}
+                  />
+                  <StarRow
+                    label="Cumplimiento del plan"
+                    value={mealExp.cumplimiento}
+                    onChange={(v) => setMealExp((p) => ({ ...p, cumplimiento: v }))}
+                  />
+                </View>
 
-              <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
-                <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>Cancelar</Button>
-                <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={addMeal}>
-                  Guardar
-                </Button>
-              </View>
-            </ScrollView>
-          </Modal>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    gap: 10,
+                    justifyContent: "flex-end",
+                    marginTop: 14,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Button onPress={() => setOpenMealModal(false)} textColor={theme.text}>
+                    Cancelar
+                  </Button>
+                  <Button
+                    mode="contained"
+                    style={styles.primaryBtn}
+                    labelStyle={styles.primaryBtnText}
+                    onPress={addMeal}
+                  >
+                    Guardar
+                  </Button>
+                </View>
+              </ScrollView>
+            </Modal>
         </Portal>
 
-        {/* MODAL EDITAR COMIDA */}
-        <Portal>
-          <Modal
-            visible={!!editingMeal}
-            onDismiss={() => setEditingMeal(null)}
-            contentContainerStyle={{
-              backgroundColor: "#FFFFFF",
-              margin: 14,
-              padding: 16,
-              borderRadius: 20,
-              borderWidth: 1,
-              borderColor: theme.border2,
-              ...theme.shadow,
-              maxHeight: Platform.OS === "web" ? 560 : 640,
-            }}
-          >
-            <ScrollView>
-              <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>Editar comida</Text>
 
-              <TextInput
-                label="Fecha (YYYY-MM-DD)"
-                value={editingMeal?.date || ""}
-                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, date: t } : p))}
-                style={[{ marginTop: 12 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+       {/* MODAL EDITAR COMIDA */}
+          <Portal>
+            <Modal
+              visible={!!editingMeal}
+              onDismiss={() => setEditingMeal(null)}
+              contentContainerStyle={{
+                backgroundColor: "#FFFFFF",
+                margin: 14,
+                padding: 16,
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: theme.border2,
+                ...theme.shadow,
+                maxHeight: Platform.OS === "web" ? 560 : 640,
+              }}
+            >
+              <ScrollView>
+                <Text style={{ color: theme.text, fontSize: 16, fontWeight: "900" }}>
+                  Editar comida
+                </Text>
 
-              <TextInput
-                label="Tipo"
-                value={editingMeal?.mealType || ""}
-                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, mealType: t } : p))}
-                style={[{ marginTop: 10 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+                <TextInput
+                  label="Fecha (YYYY-MM-DD)"
+                  value={editingMeal?.date || ""}
+                  onChangeText={(t) =>
+                    setEditingMeal((p) => (p ? { ...p, date: t } : p))
+                  }
+                  style={[{ marginTop: 12 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-              <TextInput
-                label="Texto"
-                value={editingMeal?.text || ""}
-                onChangeText={(t) => setEditingMeal((p) => (p ? { ...p, text: t } : p))}
-                multiline
-                style={[{ marginTop: 10 }, styles.input]}
-                outlineColor={theme.border}
-                activeOutlineColor={theme.violet}
-                textColor={theme.text}
-                mode="outlined"
-              />
+                <TextInput
+                  label="Tipo"
+                  value={editingMeal?.mealType || ""}
+                  onChangeText={(t) =>
+                    setEditingMeal((p) => (p ? { ...p, mealType: t } : p))
+                  }
+                  style={[{ marginTop: 10 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-              <View style={{ marginTop: 12, padding: 12, borderRadius: 16, borderWidth: 1, borderColor: theme.border2, backgroundColor: "#FFFFFF" }}>
-                <Text style={{ fontWeight: "900", color: theme.text }}>Experiencia (⭐)</Text>
+                <TextInput
+                  label="Texto"
+                  value={editingMeal?.text || ""}
+                  onChangeText={(t) =>
+                    setEditingMeal((p) => (p ? { ...p, text: t } : p))
+                  }
+                  multiline
+                  style={[{ marginTop: 10 }, styles.input]}
+                  outlineColor={theme.border}
+                  activeOutlineColor={theme.violet}
+                  textColor={theme.text}
+                  mode="outlined"
+                />
 
-                <StarRow label="General" value={editingMeal?.experience?.general || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, general: v } } : p))} />
-                <StarRow label="Saciedad" value={editingMeal?.experience?.saciedad || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, saciedad: v } } : p))} />
-                <StarRow label="Energía" value={editingMeal?.experience?.energia || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, energia: v } } : p))} />
-                <StarRow label="Digestión" value={editingMeal?.experience?.digestion || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, digestion: v } } : p))} />
-                <StarRow label="Ansiedad / Antojos" value={editingMeal?.experience?.ansiedad || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, ansiedad: v } } : p))} />
-                <StarRow label="Cumplimiento del plan" value={editingMeal?.experience?.cumplimiento || 0} onChange={(v) => setEditingMeal((p) => (p ? { ...p, experience: { ...p.experience, cumplimiento: v } } : p))} />
-              </View>
+                <View
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    borderRadius: 16,
+                    borderWidth: 1,
+                    borderColor: theme.border2,
+                    backgroundColor: "#FFFFFF",
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: theme.text }}>
+                    Experiencia (⭐)
+                  </Text>
 
-              <View style={{ flexDirection: "row", gap: 10, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
-                <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>Cancelar</Button>
-                <Button mode="contained" style={styles.primaryBtn} labelStyle={styles.primaryBtnText} onPress={saveMealEdit}>
-                  Guardar cambios
-                </Button>
-              </View>
-            </ScrollView>
-          </Modal>
-        </Portal>
+                  <StarRow
+                    label="General"
+                    value={editingMeal?.experience?.general || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, general: v } }
+                          : p
+                      )
+                    }
+                  />
+                  <StarRow
+                    label="Saciedad"
+                    value={editingMeal?.experience?.saciedad || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, saciedad: v } }
+                          : p
+                      )
+                    }
+                  />
+                  <StarRow
+                    label="Energía"
+                    value={editingMeal?.experience?.energia || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, energia: v } }
+                          : p
+                      )
+                    }
+                  />
+                  <StarRow
+                    label="Digestión"
+                    value={editingMeal?.experience?.digestion || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, digestion: v } }
+                          : p
+                      )
+                    }
+                  />
+                  <StarRow
+                    label="Ansiedad / Antojos"
+                    value={editingMeal?.experience?.ansiedad || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, ansiedad: v } }
+                          : p
+                      )
+                    }
+                  />
+                  <StarRow
+                    label="Cumplimiento del plan"
+                    value={editingMeal?.experience?.cumplimiento || 0}
+                    onChange={(v) =>
+                      setEditingMeal((p) =>
+                        p
+                          ? { ...p, experience: { ...p.experience, cumplimiento: v } }
+                          : p
+                      )
+                    }
+                  />
+                </View>
+
+                <View
+                  style={{
+                    flexDirection: "row",
+                    gap: 10,
+                    justifyContent: "flex-end",
+                    marginTop: 14,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Button onPress={() => setEditingMeal(null)} textColor={theme.text}>
+                    Cancelar
+                  </Button>
+                  <Button
+                    mode="contained"
+                    style={styles.primaryBtn}
+                    labelStyle={styles.primaryBtnText}
+                    onPress={saveMealEdit}
+                  >
+                    Guardar cambios
+                  </Button>
+                </View>
+              </ScrollView>
+            </Modal>
+          </Portal>
+
 
         <Snackbar visible={snack.open} onDismiss={() => setSnack({ open: false, msg: "" })} duration={2500}>
           {snack.msg}

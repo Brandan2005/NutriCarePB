@@ -13,6 +13,8 @@ type IconName =
   | "lock-open"
   | "email"
   | "account"
+  | "check-circle"
+  | "close-circle"
   | "calendar"
   | "clock";
 
@@ -49,6 +51,13 @@ const ICONS: Record<IconName, string> = {
   // (para outline real habría que usar stroke, pero esto es suficiente visualmente)
   "star-outline":
     "M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z",
+    // ✅ check circle
+  "check-circle":
+    "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14l-4-4 1.41-1.41L11 12.17l5.59-5.59L18 8l-7 8z",
+
+  // ❌ close circle
+  "close-circle":
+    "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.59 13.59L14.17 14.17 12 12l-2.17 2.17-1.42-1.42L10.59 10.59 8.41 8.41l1.42-1.42L12 9.17l2.17-2.18 1.42 1.42-2.18 2.18 2.18 2.17-1.42 1.42z",
 
   // ✏️
   pencil:

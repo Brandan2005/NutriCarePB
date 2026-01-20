@@ -1,10 +1,24 @@
 import React, { useMemo, useState } from "react";
-import { View, Image, KeyboardAvoidingView, Platform, Pressable } from "react-native";
-import { Button, Card, Text, TextInput, Divider, HelperText } from "react-native-paper";
+import {
+  View,
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+} from "react-native";
+import {
+  Button,
+  Card,
+  Text,
+  TextInput,
+  Divider,
+  HelperText,
+} from "react-native-paper";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../shared/services/firebase";
 import { useGoogleSignIn } from "../shared/services/googleAuth";
 import { router } from "expo-router";
+import { AppIcon } from "../shared/components/AppIcon";
 
 function isValidEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
@@ -22,15 +36,23 @@ function friendlyAuthError(message: string) {
   if (msg.includes("popup_closed_by_user") || msg.includes("cancelled") || msg.includes("closed")) {
     return "Cancelaste el inicio con Google.";
   }
-  if (msg.includes("invalid-credential") || msg.includes("wrong-password")) return "Email o contraseña incorrectos.";
-  if (msg.includes("user-not-found")) return "No existe una cuenta con ese email.";
-  if (msg.includes("too-many-requests")) return "Demasiados intentos. Probá de nuevo en unos minutos.";
-  if (msg.includes("network")) return "Problema de conexión. Revisá internet e intentá nuevamente.";
+  if (msg.includes("invalid-credential") || msg.includes("wrong-password"))
+    return "Email o contraseña incorrectos.";
+  if (msg.includes("user-not-found"))
+    return "No existe una cuenta con ese email.";
+  if (msg.includes("too-many-requests"))
+    return "Demasiados intentos. Probá de nuevo en unos minutos.";
+  if (msg.includes("network"))
+    return "Problema de conexión. Revisá internet e intentá nuevamente.";
 
   return "No se pudo iniciar sesión. Revisá la consola para ver el error real.";
 }
 
-export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void }) {
+export default function LoginScreen({
+  onGoRegister,
+}: {
+  onGoRegister: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -40,8 +62,14 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
 
-  const emailOk = useMemo(() => (email.length === 0 ? true : isValidEmail(email)), [email]);
-  const passOk = useMemo(() => (password.length === 0 ? true : password.length >= 6), [password]);
+  const emailOk = useMemo(
+    () => (email.length === 0 ? true : isValidEmail(email)),
+    [email]
+  );
+  const passOk = useMemo(
+    () => (password.length === 0 ? true : password.length >= 6),
+    [password]
+  );
 
   const { signInWithGoogle, isConfigured } = useGoogleSignIn();
 
@@ -72,23 +100,19 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
   async function onLoginGoogle() {
     setError("");
 
-    // En web, aunque falte webClientId, Firebase popup puede funcionar igual
-    // pero lo dejamos como warning/guía
     if (!isConfigured && Platform.OS !== "web") {
-      setError("Falta EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env. Reiniciá con: npx expo start -c");
+      setError(
+        "Falta EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID en .env. Reiniciá con: npx expo start -c"
+      );
       return;
     }
 
     setBusyGoogle(true);
     try {
-      console.log("🔵 Google Login START...");
       const cred = await signInWithGoogle();
-      console.log("✅ Google Login OK =>", cred?.user?.uid, cred?.user?.email);
-      // Tu app/(tabs)/_layout.tsx ya detecta sesión y redirige
+      console.log("✅ Google Login OK =>", cred?.user?.uid);
     } catch (e: any) {
-      console.log("❌ GOOGLE LOGIN ERROR OBJECT =>", e);
-      console.log("❌ GOOGLE LOGIN ERROR MESSAGE =>", e?.message);
-      console.log("❌ GOOGLE LOGIN ERROR CODE =>", e?.code);
+      console.log("❌ GOOGLE LOGIN ERROR =>", e);
       setError(friendlyAuthError(String(e?.message || e)));
     } finally {
       setBusyGoogle(false);
@@ -110,7 +134,7 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
           width: "100%",
         }}
       >
-        {/* LOGO clickeable => /public */}
+        {/* LOGO */}
         <View style={{ alignItems: "center", marginBottom: 18 }}>
           <Pressable onPress={() => router.push("/(public)")}>
             <Image
@@ -161,8 +185,14 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
               error={!passOk}
               right={
                 <TextInput.Icon
-                  icon={showPassword ? "eye-off" : "eye"}
                   onPress={() => setShowPassword((s) => !s)}
+                  icon={() => (
+                    <AppIcon
+                      name={showPassword ? "eye-off" : "eye"}
+                      size={20}
+                      color="#64748B"
+                    />
+                  )}
                 />
               }
               style={{ marginBottom: 6 }}
@@ -196,10 +226,18 @@ export default function LoginScreen({ onGoRegister }: { onGoRegister: () => void
           </Card.Content>
         </Card>
 
-        <Text style={{ textAlign: "center", opacity: 0.55, marginTop: 14, fontSize: 12 }}>
+        <Text
+          style={{
+            textAlign: "center",
+            opacity: 0.55,
+            marginTop: 14,
+            fontSize: 12,
+          }}
+        >
           Al continuar aceptás nuestros términos y política de privacidad.
         </Text>
       </View>
     </KeyboardAvoidingView>
   );
 }
+

@@ -1,142 +1,140 @@
-// src/shared/services/nutritionists.ts
 import { onValue, ref } from "firebase/database";
 import { rtdb } from "./firebase";
 
-export type BreakRange = { start: string; end: string };
+export type NutriDayKey = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
-export type AvailabilityDay = {
-  start?: string; // "09:00"
-  end?: string;   // "18:00"
-  slotMin?: number; // default 30
-  breaks?: BreakRange[] | Record<string, BreakRange> | null;
-};
-
-export type Availability = {
-  sun?: AvailabilityDay;
-  mon?: AvailabilityDay;
-  tue?: AvailabilityDay;
-  wed?: AvailabilityDay;
-  thu?: AvailabilityDay;
-  fri?: AvailabilityDay;
-  sat?: AvailabilityDay;
+export type NutriAvailabilityDay = {
+  enabled?: boolean;              // default true
+  start?: string;                 // "09:00"
+  end?: string;                   // "18:00"
+  slotMinutes?: number;           // default 30
+  breaks?: Array<{ start: string; end: string }>; // opcional
 };
 
 export type Nutritionist = {
   uid: string;
+  role?: string;
   name: string;
   email: string;
   photoURL?: string;
-  role?: string;
-  availability?: Availability;
+
+  // availability puede venir bien o “sucia”. La normalizamos.
+  availability?: Partial<Record<NutriDayKey, NutriAvailabilityDay>>;
+
+  // Campos opcionales
+  createdAt?: number;
 };
 
-// -------- helpers --------
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
 
-function minToHHmm(min: number) {
-  const hh = Math.floor(min / 60);
-  const mm = min % 60;
-  return `${pad2(hh)}:${pad2(mm)}`;
-}
-
-function toMin(hhmm?: string): number | null {
-  if (!hhmm || typeof hhmm !== "string") return null;
+function toMin(hhmm: string) {
   const [h, m] = hhmm.split(":").map((x) => Number(x));
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
 }
 
-function normalizeBreaks(
-  br?: AvailabilityDay["breaks"]
-): BreakRange[] {
-  if (!br) return [];
-  if (Array.isArray(br)) return br.filter(Boolean) as BreakRange[];
-  // RTDB a veces guarda arrays como objeto {key:{...}}
-  if (typeof br === "object") return Object.values(br).filter(Boolean) as BreakRange[];
-  return [];
-}
-
-function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number) {
-  return aStart < bEnd && bStart < aEnd;
-}
-
-export function generateSlotsForNutri(cfg?: AvailabilityDay): string[] {
-  if (!cfg) return [];
-
-  const startMin = toMin(cfg.start);
-  const endMin = toMin(cfg.end);
-  if (startMin === null || endMin === null) return [];
-  if (endMin <= startMin) return [];
-
-  const slotMin = Number(cfg.slotMin ?? 30);
-  const breaks = normalizeBreaks(cfg.breaks)
-    .map((b) => ({
-      s: toMin(b?.start) ?? null,
-      e: toMin(b?.end) ?? null,
-    }))
-    .filter((b) => b.s !== null && b.e !== null && (b.e as number) > (b.s as number))
-    .map((b) => ({ s: b.s as number, e: b.e as number }));
-
-  const slots: string[] = [];
-
-  for (let t = startMin; t + slotMin <= endMin; t += slotMin) {
-    const tEnd = t + slotMin;
-
-    // si cae dentro de un break, lo salteo
-    const inBreak = breaks.some((br) => overlaps(t, tEnd, br.s, br.e));
-    if (inBreak) continue;
-
-    slots.push(minToHHmm(t));
-  }
-
-  return slots;
-}
-
-export function getSlotsForNutriOnDay(
-  nutri: Nutritionist,
-  dowKey: keyof Availability
-): string[] {
-  const cfg = nutri?.availability?.[dowKey];
-  return generateSlotsForNutri(cfg);
+function fromMin(min: number) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${pad2(h)}:${pad2(m)}`;
 }
 
 /**
- * Lee nutricionistas desde RTDB.
- * Estructura esperada:
- * users/{uid} = { role:"nutricionista", name, email, photoURL, availability:{ mon:{...}, ... } }
+ * Normaliza breaks para que SIEMPRE sea array.
+ * A veces en RTDB se guardan como objeto:
+ * breaks: { a:{start,end}, b:{start,end} }
  */
-export function listenNutritionists(
-  cb: (list: Nutritionist[]) => void
-) {
+function normalizeBreaks(raw: any): Array<{ start: string; end: string }> {
+  if (Array.isArray(raw)) {
+    return raw
+      .filter(Boolean)
+      .map((b) => ({ start: String(b.start || ""), end: String(b.end || "") }))
+      .filter((b) => b.start.includes(":") && b.end.includes(":"));
+  }
+
+  if (raw && typeof raw === "object") {
+    return Object.values(raw)
+      .filter(Boolean)
+      .map((b: any) => ({ start: String(b.start || ""), end: String(b.end || "") }))
+      .filter((b) => b.start.includes(":") && b.end.includes(":"));
+  }
+
+  return [];
+}
+
+function normalizeDay(raw: any): NutriAvailabilityDay {
+  const enabled = raw?.enabled ?? true;
+  const start = String(raw?.start ?? "09:00");
+  const end = String(raw?.end ?? "18:00");
+  const slotMinutes = Number(raw?.slotMinutes ?? 30) || 30;
+  const breaks = normalizeBreaks(raw?.breaks);
+
+  return { enabled, start, end, slotMinutes, breaks };
+}
+
+function isInBreak(t: string, breaks: Array<{ start: string; end: string }>) {
+  const m = toMin(t);
+  for (const b of breaks) {
+    const bs = toMin(b.start);
+    const be = toMin(b.end);
+    if (m >= bs && m < be) return true;
+  }
+  return false;
+}
+
+/**
+ * Genera slots para un nutri y un día (mon/tue...).
+ * - respeta enabled
+ * - respeta breaks
+ * - respeta slotMinutes
+ */
+export function getSlotsForNutriOnDay(nutri: Nutritionist, day: NutriDayKey): string[] {
+  const rawDay = nutri?.availability?.[day];
+  const cfg = normalizeDay(rawDay);
+
+  if (!cfg.enabled) return [];
+
+  const startStr = cfg.start ?? "09:00";
+  const endStr = cfg.end ?? "18:00";
+
+  const startMin = toMin(startStr);
+  const endMin = toMin(endStr);
+
+
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return [];
+
+  const step = cfg.slotMinutes ?? 30;
+  const out: string[] = [];
+
+  for (let m = startMin; m + step <= endMin; m += step) {
+    const t = fromMin(m);
+    if (!isInBreak(t, cfg.breaks || [])) out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Lista nutricionistas: users donde role === "nutricionista"
+ */
+export function listenNutritionists(cb: (list: Nutritionist[]) => void) {
   const usersRef = ref(rtdb, "users");
-
-  const unsub = onValue(usersRef, (snap) => {
+  return onValue(usersRef, (snap) => {
     const val = snap.val() || {};
-
     const list: Nutritionist[] = Object.keys(val)
-      .map((uid) => {
-        const u = val[uid] || {};
-        if (u.role !== "nutricionista") return null;
+      .map((uid) => ({
+        uid,
+        role: val[uid]?.role,
+        name: String(val[uid]?.name || "Nutricionista"),
+        email: String(val[uid]?.email || ""),
+        photoURL: val[uid]?.photoURL ? String(val[uid]?.photoURL) : undefined,
+        availability: val[uid]?.availability || undefined,
+        createdAt: val[uid]?.createdAt ? Number(val[uid]?.createdAt) : undefined,
+      }))
+      .filter((u) => (u.role || "").toLowerCase() === "nutricionista");
 
-        const n: Nutritionist = {
-          uid,
-          name: String(u.name ?? "Nutricionista"),
-          email: String(u.email ?? ""),
-          photoURL: u.photoURL ? String(u.photoURL) : "",
-          role: String(u.role ?? ""),
-          availability: (u.availability ?? undefined) as Availability | undefined,
-        };
-        return n;
-      })
-      .filter(Boolean) as Nutritionist[];
-
-    // orden lindo
-    list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-
+    // orden
+    list.sort((a, b) => a.name.localeCompare(b.name));
     cb(list);
   });
-
-  return () => unsub();
 }
